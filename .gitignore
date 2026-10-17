@@ -1,0 +1,11 @@
+# 用户配置（运行时自动生成）
+config.json
+
+# 调试日志（运行时生成）
+hover_debug.log
+
+# 旧编译产物
+DesktopHoverFolder*.exe
+TestHarness.exe
+TestI18n.exe
+*.bak.exe

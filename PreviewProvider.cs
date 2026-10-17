@@ -1,0 +1,521 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Net;
+using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Diagnostics;
+using System.Xml;
+
+namespace HoverExplorer
+{
+    internal class PreviewResult
+    {
+        public enum KindEnum { Image, Text }
+        public KindEnum Kind;
+        public Image Image;
+        public bool IsGif;
+        public int DisplayW;
+        public int DisplayH;
+        public string Text;
+        public long Size;
+    }
+
+    internal static class PreviewProvider
+    {
+        public static bool CanPreview(string path)
+        {
+            if (path == null) return false;
+            string ext = Path.GetExtension(path);
+            return Config.ImgExts.Contains(ext)
+                || Config.TextExts.Contains(ext)
+                || Config.OfficeExts.Contains(ext)
+                || Config.ZipExts.Contains(ext)
+                || Config.SevenZipExts.Contains(ext)
+                || Config.FontExts.Contains(ext)
+                || Config.ExeExts.Contains(ext)
+                || Config.IcoExts.Contains(ext)
+                || Config.LnkExts.Contains(ext)
+                || Config.EpubExts.Contains(ext);
+        }
+
+        public static PreviewResult Generate(string full)
+        {
+            string ext = Path.GetExtension(full).ToLowerInvariant();
+            if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext)) return GenImage(full);
+            if (Config.FontExts.Contains(ext)) return GenFont(full);
+            if (Config.OfficeExts.Contains(ext)) return GenOffice(full, ext);
+            if (Config.ZipExts.Contains(ext)) return GenZip(full);
+            if (Config.SevenZipExts.Contains(ext)) return GenSevenZip(full);
+            if (Config.ExeExts.Contains(ext)) return GenExe(full);
+            if (Config.LnkExts.Contains(ext)) return GenLnk(full);
+            if (Config.EpubExts.Contains(ext)) return GenEpub(full);
+            if (ext == ".csv") return GenCsv(full);
+            return GenText(full);
+        }
+
+        // ===== 图片 / 图标 / TIFF =====
+        private static PreviewResult GenImage(string full)
+        {
+            Image img;
+            string ext = Path.GetExtension(full).ToLowerInvariant();
+            if (ext == ".ico")
+            {
+                try { using (var icon = new Icon(full)) img = icon.ToBitmap(); }
+                catch { img = Image.FromFile(full); }
+            }
+            else
+            {
+                img = Image.FromFile(full);
+                if ((ext == ".tiff" || ext == ".tif") && img.FrameDimensionsList.Length > 0)
+                {
+                    var dim = new FrameDimension(img.FrameDimensionsList[0]);
+                    img.SelectActiveFrame(dim, 0);
+                }
+            }
+            int frameCount = 1;
+            bool isGif = false;
+            if (img.FrameDimensionsList.Length > 0)
+            {
+                var dim = new FrameDimension(img.FrameDimensionsList[0]);
+                frameCount = img.GetFrameCount(dim);
+                isGif = img.RawFormat.Equals(ImageFormat.Gif) && frameCount > 1;
+            }
+            double ratio = Math.Min((double)Config.PreviewMax / img.Width, (double)Config.PreviewMax / img.Height);
+            if (ratio > 1) ratio = 1;
+            int w = (int)(img.Width * ratio), h = (int)(img.Height * ratio);
+            if (isGif)
+            {
+                return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = img, IsGif = true, DisplayW = w, DisplayH = h };
+            }
+            var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.DrawImage(img, 0, 0, w, h);
+            }
+            img.Dispose();
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = bmp };
+        }
+
+        // ===== 字体样张 =====
+        // 关键：PrivateFontCollection 必须存活到 DrawString 完成，且 Font 必须用 FontFamily 对象构造
+        // （new Font(string, float) 只查系统字体集合，不查私有集合）
+        private static PreviewResult GenFont(string full)
+        {
+            int W = Config.PreviewMax * 2, H = Config.PreviewMax * 2;
+            var bmp = new Bitmap(W, H);
+            var pfc = new PrivateFontCollection();
+            try { pfc.AddFontFile(full); }
+            catch { pfc.Dispose(); bmp.Dispose(); return null; }
+            FontFamily family;
+            try { family = pfc.Families[0]; }
+            catch { pfc.Dispose(); bmp.Dispose(); return null; }
+            string familyName = family.Name;
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Config.BG);
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                var sample = "The quick brown fox jumps over the lazy dog";
+                var sample2 = "天地玄黄 宇宙洪荒 0123456789";
+                var sizes = new[] { 22f, 16f, 12f, 9f };
+                float y = 8;
+                using (var brush = new SolidBrush(Config.FG))
+                {
+                    foreach (var sz in sizes)
+                    {
+                        using (var font = new Font(family, sz))
+                        {
+                            g.DrawString(sample, font, brush, 8, y);
+                            y += font.GetHeight(g) + 4;
+                            g.DrawString(sample2, font, brush, 8, y);
+                            y += font.GetHeight(g) + 8;
+                        }
+                    }
+                }
+                using (var font = new Font(Config.FontName, 9f))
+                using (var brush = new SolidBrush(Config.FgDir))
+                    g.DrawString(I18n.T("font_label") + familyName, font, brush, 8, y);
+            }
+            pfc.Dispose();
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = bmp };
+        }
+
+        // ===== Office 文档文本提取（.docx/.xlsx/.pptx，zip+xml） =====
+        private static PreviewResult GenOffice(string full, string ext)
+        {
+            var sb = new StringBuilder();
+            const int MaxChars = 8000;
+            try
+            {
+                using (var za = ZipFile.OpenRead(full))
+                {
+                    if (ext == ".docx")
+                    {
+                        var entry = za.GetEntry("word/document.xml");
+                        if (entry != null) ExtractXmlText(entry, sb, MaxChars, "t");
+                    }
+                    else if (ext == ".xlsx")
+                    {
+                        var entry = za.GetEntry("xl/sharedStrings.xml");
+                        if (entry != null) ExtractXmlText(entry, sb, MaxChars, "t");
+                    }
+                    else if (ext == ".pptx")
+                    {
+                        for (int i = 1; i <= 50; i++)
+                        {
+                            var entry = za.GetEntry("ppt/slides/slide" + i + ".xml");
+                            if (entry == null) continue;
+                            if (sb.Length > 0) sb.AppendLine();
+                            sb.AppendLine(I18n.T("slide", i));
+                            ExtractXmlText(entry, sb, MaxChars - sb.Length, "t");
+                            if (sb.Length >= MaxChars) break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (sb.Length == 0) sb.AppendLine(I18n.T("office_no_text"));
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        private static void ExtractXmlText(ZipArchiveEntry entry, StringBuilder sb, int maxChars, string textElementLocalName)
+        {
+            using (var stream = entry.Open())
+            using (var reader = XmlReader.Create(stream))
+            {
+                while (reader.Read() && sb.Length < maxChars)
+                {
+                    if (reader.NodeType == XmlNodeType.Element && reader.LocalName == textElementLocalName)
+                    {
+                        string text = reader.ReadElementContentAsString();
+                        if (!string.IsNullOrEmpty(text)) sb.AppendLine(text);
+                    }
+                }
+            }
+        }
+
+        // ===== zip 清单 =====
+        private static PreviewResult GenZip(string full)
+        {
+            var sb = new StringBuilder();
+            int total;
+            using (var za = ZipFile.OpenRead(full))
+            {
+                total = za.Entries.Count;
+                int n = 0;
+                foreach (var e in za.Entries)
+                {
+                    if (n >= 200) break;
+                    sb.AppendLine(string.Format("{0,-10} {1}", FmtSize(e.Length), e.FullName));
+                    n++;
+                }
+            }
+            if (total > 200) sb.AppendLine(I18n.T("total_items", total));
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        // ===== 7z / rar（调用 Bandizip 控制台版 bz.exe，l 命令只在 bz.exe 可用） =====
+        // 列宽因格式而异（zip 11 列、7z 6 列），需动态从表头找 Name/Size 列位置
+        private static PreviewResult GenSevenZip(string full)
+        {
+            var exe = FindBzExe();
+            if (exe == null)
+                return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = I18n.T("no_bandizip"), Size = new FileInfo(full).Length };
+
+            string output;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exe,
+                    Arguments = "l -list:v -consolemode:utf8 \"" + full + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                };
+                using (var p = Process.Start(psi))
+                {
+                    output = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(8000)) { try { p.Kill(); } catch { } }
+                }
+            }
+            catch (Exception ex)
+            {
+                return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = I18n.T("bz_failed") + ex.Message, Size = new FileInfo(full).Length };
+            }
+
+            var lines = output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            int nameCol = -1, sizeStart = -1, sizeEnd = -1;
+            bool inData = false;
+            int sepCount = 0;
+            var entries = new List<Tuple<long, string>>();
+
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("------"))
+                {
+                    sepCount++;
+                    inData = sepCount == 1;
+                    continue;
+                }
+                if (nameCol < 0 && line.Contains("Name") && line.Contains("Size"))
+                {
+                    nameCol = line.IndexOf("Name");
+                    int sizeIdx = line.IndexOf("Size");
+                    int compIdx = line.IndexOf("CompSize");
+                    if (sizeIdx >= 0 && compIdx > sizeIdx) { sizeStart = sizeIdx; sizeEnd = compIdx; }
+                    continue;
+                }
+                if (inData && line.Length > 0 && char.IsDigit(line[0]))
+                {
+                    string name = nameCol >= 0 && line.Length > nameCol ? line.Substring(nameCol).Trim() : "";
+                    long size = -1;
+                    if (sizeStart >= 0 && sizeEnd > sizeStart && line.Length >= sizeEnd)
+                        long.TryParse(line.Substring(sizeStart, sizeEnd - sizeStart).Trim(), out size);
+                    if (!string.IsNullOrEmpty(name)) entries.Add(Tuple.Create(size, name));
+                }
+            }
+
+            var sb = new StringBuilder();
+            int total = entries.Count;
+            int n = 0;
+            foreach (var e in entries)
+            {
+                if (n >= 200) break;
+                sb.AppendLine(string.Format("{0,-10} {1}", e.Item1 >= 0 ? FmtSize(e.Item1) : "?", e.Item2));
+                n++;
+            }
+            if (total > 200) sb.AppendLine(I18n.T("total_items", total));
+            if (total == 0) sb.AppendLine(I18n.T("empty_archive"));
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        private static string FindBzExe()
+        {
+            var candidates = new[]
+            {
+                @"C:\Program Files\Bandizip\bz.exe",
+                @"C:\Program Files (x86)\Bandizip\bz.exe",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Bandizip", "bz.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Bandizip", "bz.exe"),
+            };
+            foreach (var c in candidates)
+                if (File.Exists(c)) return c;
+            return null;
+        }
+
+        // ===== EXE/DLL 版本信息 =====
+        private static PreviewResult GenExe(string full)
+        {
+            var info = FileVersionInfo.GetVersionInfo(full);
+            var sb = new StringBuilder();
+            sb.AppendLine(I18n.T("file_label") + Path.GetFileName(full));
+            if (!string.IsNullOrEmpty(info.FileDescription)) sb.AppendLine(I18n.T("desc_label") + info.FileDescription);
+            if (!string.IsNullOrEmpty(info.ProductName)) sb.AppendLine(I18n.T("product_label") + info.ProductName);
+            if (!string.IsNullOrEmpty(info.CompanyName)) sb.AppendLine(I18n.T("company_label") + info.CompanyName);
+            if (!string.IsNullOrEmpty(info.FileVersion)) sb.AppendLine(I18n.T("version_label") + info.FileVersion);
+            if (!string.IsNullOrEmpty(info.OriginalFilename)) sb.AppendLine(I18n.T("origfile_label") + info.OriginalFilename);
+            bool managed = false;
+            try { AssemblyName.GetAssemblyName(full); managed = true; } catch { }
+            if (full.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                sb.AppendLine(I18n.T("type_label") + (managed ? I18n.T("managed_asm") : I18n.T("native_dll")));
+            else if (managed)
+                sb.AppendLine(I18n.T("type_label") + I18n.T("managed_exe"));
+            sb.AppendLine(I18n.T("size_label") + FmtSize(new FileInfo(full).Length));
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        // ===== 快捷方式 .lnk（WScript.Shell COM 反射调用，免引用 IWshRuntimeLibrary） =====
+        private static PreviewResult GenLnk(string full)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                var shellType = Type.GetTypeFromProgID("WScript.Shell");
+                var shell = Activator.CreateInstance(shellType);
+                var sc = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { full });
+                var scType = sc.GetType();
+                string target = (string)scType.InvokeMember("TargetPath", BindingFlags.GetProperty, null, sc, null);
+                string args = (string)scType.InvokeMember("Arguments", BindingFlags.GetProperty, null, sc, null);
+                string workDir = (string)scType.InvokeMember("WorkingDirectory", BindingFlags.GetProperty, null, sc, null);
+                string icon = (string)scType.InvokeMember("IconLocation", BindingFlags.GetProperty, null, sc, null);
+                string desc = (string)scType.InvokeMember("Description", BindingFlags.GetProperty, null, sc, null);
+                if (!string.IsNullOrEmpty(target)) sb.AppendLine(I18n.T("target_label") + target);
+                if (!string.IsNullOrEmpty(args)) sb.AppendLine(I18n.T("args_label") + args);
+                if (!string.IsNullOrEmpty(workDir)) sb.AppendLine(I18n.T("workdir_label") + workDir);
+                if (!string.IsNullOrEmpty(icon)) sb.AppendLine(I18n.T("icon_label") + icon);
+                if (!string.IsNullOrEmpty(desc)) sb.AppendLine(I18n.T("desc_label") + desc);
+                if (!string.IsNullOrEmpty(target))
+                    sb.AppendLine(I18n.T("exists_label") + ((File.Exists(target) || Directory.Exists(target)) ? I18n.T("yes") : I18n.T("no")));
+            }
+            catch (Exception ex) { sb.AppendLine(I18n.T("parse_failed") + ex.Message + ")"); }
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        // ===== EPub 目录（兼容 EPUB2 NCX 和 EPUB3 nav） =====
+        private static PreviewResult GenEpub(string full)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                using (var za = ZipFile.OpenRead(full))
+                {
+                    var opfEntry = za.Entries.FirstOrDefault(e => e.FullName.EndsWith(".opf", StringComparison.OrdinalIgnoreCase));
+                    if (opfEntry != null)
+                    {
+                        using (var sr = new StreamReader(opfEntry.Open(), Encoding.UTF8))
+                        {
+                            var opfText = sr.ReadToEnd();
+                            var titleMatch = Regex.Match(opfText, "<dc:title[^>]*>([^<]*)</dc:title>");
+                            if (titleMatch.Success) sb.AppendLine(I18n.T("title_label") + WebUtility.HtmlDecode(titleMatch.Groups[1].Value.Trim()));
+                            var authorMatch = Regex.Match(opfText, "<dc:creator[^>]*>([^<]*)</dc:creator>");
+                            if (authorMatch.Success) sb.AppendLine(I18n.T("author_label") + WebUtility.HtmlDecode(authorMatch.Groups[1].Value.Trim()));
+                            var langMatch = Regex.Match(opfText, "<dc:language[^>]*>([^<]*)</dc:language>");
+                            if (langMatch.Success) sb.AppendLine(I18n.T("lang_label") + langMatch.Groups[1].Value.Trim());
+                        }
+                    }
+                    sb.AppendLine();
+                    sb.AppendLine(I18n.T("toc_header"));
+                    var ncxEntry = za.Entries.FirstOrDefault(e => e.FullName.EndsWith(".ncx", StringComparison.OrdinalIgnoreCase));
+                    if (ncxEntry != null)
+                    {
+                        using (var sr = new StreamReader(ncxEntry.Open(), Encoding.UTF8))
+                        {
+                            var ncxText = sr.ReadToEnd();
+                            int n = 0;
+                            foreach (Match m in Regex.Matches(ncxText, @"<navLabel>\s*<text>([^<]*)</text>"))
+                            {
+                                if (n >= 50) { sb.AppendLine("…"); break; }
+                                sb.AppendLine("• " + WebUtility.HtmlDecode(m.Groups[1].Value.Trim()));
+                                n++;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var navEntry = za.Entries.FirstOrDefault(e => e.FullName.EndsWith(".nav.xhtml", StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith(".nav.html", StringComparison.OrdinalIgnoreCase));
+                        if (navEntry != null)
+                        {
+                            using (var sr = new StreamReader(navEntry.Open(), Encoding.UTF8))
+                            {
+                                var navText = sr.ReadToEnd();
+                                int n = 0;
+                                foreach (Match m in Regex.Matches(navText, @"<a[^>]*href=""[^""]*""[^>]*>([^<]*)</a>"))
+                                {
+                                    if (n >= 50) { sb.AppendLine("…"); break; }
+                                    var t = WebUtility.HtmlDecode(m.Groups[1].Value.Trim());
+                                    if (!string.IsNullOrEmpty(t)) { sb.AppendLine("• " + t); n++; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { sb.AppendLine(I18n.T("parse_failed") + ex.Message + ")"); }
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        // ===== CSV 表格视图（对齐文本，前 50 行） =====
+        private static PreviewResult GenCsv(string full)
+        {
+            var rows = new List<string[]>();
+            int maxCols = 0;
+            using (var sr = new StreamReader(full, Encoding.UTF8, true))
+            {
+                for (int i = 0; i < 50; i++)
+                {
+                    var line = sr.ReadLine();
+                    if (line == null) break;
+                    var cols = ParseCsvLine(line);
+                    rows.Add(cols);
+                    if (cols.Length > maxCols) maxCols = cols.Length;
+                }
+            }
+            if (maxCols == 0) return GenText(full);
+            var colW = new int[maxCols];
+            foreach (var row in rows)
+                for (int i = 0; i < row.Length && i < maxCols; i++)
+                    if (row[i].Length > colW[i]) colW[i] = row[i].Length;
+            var sb = new StringBuilder();
+            for (int r = 0; r < rows.Count; r++)
+            {
+                for (int i = 0; i < maxCols; i++)
+                {
+                    var cell = i < rows[r].Length ? rows[r][i] : "";
+                    sb.Append(cell.PadRight(colW[i] + 2));
+                }
+                sb.AppendLine();
+                if (r == 0) sb.AppendLine(new string('-', Math.Min(maxCols * 12, 80)));
+            }
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
+        }
+
+        private static string[] ParseCsvLine(string line)
+        {
+            var cols = new List<string>();
+            var cur = new StringBuilder();
+            bool inQuote = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (inQuote)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < line.Length && line[i + 1] == '"') { cur.Append('"'); i++; }
+                        else inQuote = false;
+                    }
+                    else cur.Append(c);
+                }
+                else
+                {
+                    if (c == '"') inQuote = true;
+                    else if (c == ',') { cols.Add(cur.ToString()); cur.Clear(); }
+                    else cur.Append(c);
+                }
+            }
+            cols.Add(cur.ToString());
+            return cols.ToArray();
+        }
+
+        // ===== 文本（保留原逻辑：前 200 行，单行截 1000） =====
+        private static PreviewResult GenText(string full)
+        {
+            var lines = new List<string>();
+            using (var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+            {
+                for (int i = 0; i < 200; i++)
+                {
+                    string line = sr.ReadLine();
+                    if (line == null) break;
+                    if (line.Length > 1000) line = line.Substring(0, 1000);
+                    lines.Add(line);
+                }
+                if (sr.ReadLine() != null) lines.Add("…");
+            }
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = string.Join("\r\n", lines), Size = new FileInfo(full).Length };
+        }
+
+        private static string FmtSize(long n)
+        {
+            double d = n;
+            string[] units = { "B", "KB", "MB", "GB" };
+            for (int i = 0; i < units.Length; i++)
+            {
+                if (d < 1024 || i == 3)
+                    return i == 0 ? string.Format("{0:0} {1}", d, units[i]) : string.Format("{0:0.0} {1}", d, units[i]);
+                d /= 1024;
+            }
+            return string.Format("{0:0.0} GB", d);
+        }
+    }
+}

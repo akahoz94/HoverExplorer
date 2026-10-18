@@ -13,9 +13,12 @@ description: Build, version, commit, tag, push and publish a GitHub release for 
 
 ```powershell
 Stop-Process -Name HoverExplorer -Force -ErrorAction SilentlyContinue
-& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /utf8output /platform:x64 /target:winexe /out:HoverExplorer.exe /win32icon:icon.ico /r:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsFormsIntegration.dll" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Xml.dll /r:System.Xml.Linq.dll /r:PresentationCore.dll /r:PresentationFramework.dll /r:WindowsBase.dll /resource:donate_qr.png,HoverExplorer.donate_qr.png *.cs
+$f = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"; $wpf = "$f\WPF"
+& "$f\csc.exe" /nologo /utf8output /platform:x64 /target:winexe /out:HoverExplorer.exe /main:HoverExplorer.Program /r:"$wpf\WindowsFormsIntegration.dll" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Xml.dll /r:System.Xml.Linq.dll /r:System.Xaml.dll /r:"$wpf\PresentationCore.dll" /r:"$wpf\PresentationFramework.dll" /r:"$wpf\WindowsBase.dll" /r:"$wpf\UIAutomationClient.dll" /r:"$wpf\UIAutomationTypes.dll" /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /resource:donate_qr.png,HoverExplorer.donate_qr.png *.cs
 ```
 
+- 项目无 icon.ico，不要加 `/win32icon`。
+- WPF/UIA 程序集全部在 `Framework64\v4.0.30319\WPF\` 子目录；`TestHarness.cs`/`TestI18n.cs` 有独立 Main，必须 `/main:HoverExplorer.Program`。
 - `donate_qr.png` 是嵌入资源源文件（设置窗口二维码），禁止删除；换图保持同名。
 - 编译成功后重启验证：`Start-Process .\HoverExplorer.exe`，确认无启动错误。
 

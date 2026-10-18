@@ -1874,6 +1874,10 @@ namespace HoverExplorer
             if (!IsHandleCreated || !Visible) return;
             NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
                 NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+            // 面板内的预览窗是独立窗口，同样需要每 Tick 置顶
+            if (_previewForm != null && _previewForm.IsHandleCreated && _previewForm.Visible)
+                NativeMethods.SetWindowPos(_previewForm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
         }
     }
 

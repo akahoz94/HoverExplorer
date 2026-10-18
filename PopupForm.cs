@@ -54,16 +54,32 @@ namespace HoverExplorer
     {
         // 不抢前台：预览仅为悬停展示，激活会打断当前窗口的焦点
         protected override bool ShowWithoutActivation { get { return true; } }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
             Win11.Apply(Handle, Config.Theme != "light", Config.Border);
+
         }
         private Image _img;
         private bool _pinned;
+        private Panel _toolbar;
+        private Label _iconLbl;
+        private Label _nameLbl;
+        private Label _metaLbl;
         private Label _pinBtn;
+
+        private Label _copyBtn;
+        private Label _saveBtn;
         private Panel _scrollPanel;
         private Control _content;
+        private SizeGripCtl _grip;
+        public string FilePath;
+
+        private bool _textDirty;
+
+        private Timer _unpinCloseTimer;
+        private Timer _gripTimer;
 
 
 
@@ -76,8 +92,9 @@ namespace HoverExplorer
             var pb = new PictureBox { Image = img, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill };
             _content = pb;
             _scrollPanel.Controls.Add(pb);
+            BindResize(pb);
             ClientSize = new Size(img.Width, img.Height);
-            UpdatePinPos();
+
         }
 
         public PreviewForm(Image img, int displayW, int displayH)
@@ -87,8 +104,9 @@ namespace HoverExplorer
             var pb = new PictureBox { Image = img, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill };
             _content = pb;
             _scrollPanel.Controls.Add(pb);
+            BindResize(pb);
             ClientSize = new Size(displayW, displayH);
-            UpdatePinPos();
+
         }
 
         public PreviewForm(string text, long size)
@@ -96,11 +114,11 @@ namespace HoverExplorer
         {
             var tb = new RichTextBox
             {
-                Font = new Font("Consolas", 9),
+                Font = new Font("Microsoft YaHei", 9),
                 BackColor = Config.BG,
                 ForeColor = Config.FG,
                 BorderStyle = BorderStyle.None,
-                ReadOnly = true,
+                ReadOnly = false,
                 ScrollBars = RichTextBoxScrollBars.Vertical,
                 WordWrap = true,
                 Dock = DockStyle.Fill,
@@ -110,6 +128,12 @@ namespace HoverExplorer
             tb.SelectionLength = 0;
             _content = tb;
             _scrollPanel.Controls.Add(tb);
+            BindResize(tb);
+            Win11.ApplyScrollTheme(tb, Config.Theme != "light");
+            tb.TextChanged += (s, e) =>
+            {
+                if (!_textDirty) { _textDirty = true; _saveBtn.Visible = true; UpdateToolbarBtnPos(); }
+            };
 
             using (var g = CreateGraphics())
             {
@@ -124,7 +148,18 @@ namespace HoverExplorer
                 }
                 ClientSize = new Size(Math.Min(maxW + 20, 480), Math.Min(initH, 320));
             }
-            UpdatePinPos();
+
+        }
+
+        // 自定义内容面板（音频播放器 / SVG 浏览器）
+        public PreviewForm(Control content, int w, int h)
+            : this()
+        {
+            _content = content;
+            _scrollPanel.Controls.Add(content);
+            BindResize(content);
+            ClientSize = new Size(w, h + 34);
+
         }
 
         private PreviewForm()
@@ -135,49 +170,320 @@ namespace HoverExplorer
             StartPosition = FormStartPosition.Manual;
             BackColor = Config.BG;
             DoubleBuffered = true;
+            SetStyle(ControlStyles.ResizeRedraw, true);
 
-            _scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Config.BG };
+            _toolbar = new Panel { BackColor = Config.BG, Height = 34 };
+            Controls.Add(_toolbar);
+
+            _scrollPanel = new Panel { AutoScroll = true, BackColor = Config.BG };
             Controls.Add(_scrollPanel);
+            Win11.ApplyScrollTheme(_scrollPanel, Config.Theme != "light");
+
+            // 右下角半透明拖拽手柄：平时隐藏，光标靠近右下角时浮现，避免遮挡内容
+            _grip = new SizeGripCtl { Size = new Size(18, 18), Cursor = Cursors.SizeNWSE, Visible = false };
+            _grip.MouseDown += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                NativeMethods.ReleaseCapture();
+                NativeMethods.SendMessage(Handle, 0xA1, 0x11, 0);
+            };
+            Controls.Add(_grip);
+            _grip.BringToFront();
+
+            // 轮询光标控制手柄显隐：内容控件（WPF 播放器/滚动条）不上报鼠标事件，只能靠全局光标位置判断
+            _gripTimer = new Timer { Interval = 50 };
+            _gripTimer.Tick += (s, e) =>
+            {
+                NativeMethods.POINT pt;
+                if (!NativeMethods.GetCursorPos(out pt)) return;
+                bool inCorner = pt.X >= Right - 20 && pt.X <= Right && pt.Y >= Bottom - 20 && pt.Y <= Bottom;
+                bool lDown = (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0;
+                if (inCorner || (_grip.Visible && lDown))
+                {
+                    if (!_grip.Visible) { _grip.Show(); _grip.BringToFront(); }
+                }
+                else if (_grip.Visible) _grip.Hide();
+            };
+            _gripTimer.Start();
+
+            _iconLbl = new Label
+            {
+                Size = new Size(22, 16),
+                Location = new Point(8, 9),
+                Font = new Font(Config.FontName, 7.5f, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Config.PlaceholderFg,
+                TextAlign = ContentAlignment.MiddleCenter,
+            };
+            _toolbar.Controls.Add(_iconLbl);
+
+            _nameLbl = new Label
+            {
+                Location = new Point(34, 9),
+                Font = new Font(Config.FontName, 9f, FontStyle.Bold),
+                ForeColor = Config.FG,
+                BackColor = Config.BG,
+                AutoEllipsis = true,
+            };
+            _toolbar.Controls.Add(_nameLbl);
+
+            _metaLbl = new Label
+            {
+                Font = new Font(Config.FontName, 8f),
+                ForeColor = Config.PlaceholderFg,
+                BackColor = Config.BG,
+                TextAlign = ContentAlignment.MiddleRight,
+                AutoEllipsis = true,
+            };
+            _toolbar.Controls.Add(_metaLbl);
 
             _pinBtn = new Label
             {
-                Text = I18n.T("pin"),
-                Font = new Font(Config.FontName, 8f),
-                ForeColor = Config.FG,
+                Size = new Size(20, 18),
+                AutoSize = false,
                 BackColor = Config.BG,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Size = new Size(22, 18),
+                Image = PinIcon(false),
                 Cursor = Cursors.Hand,
             };
-            Controls.Add(_pinBtn);
-            _pinBtn.BringToFront();
             _pinBtn.Click += (s, e) => TogglePin();
+            _toolbar.Controls.Add(_pinBtn);
 
 
-            Resize += (s, e) => UpdatePinPos();
+            _copyBtn = new Label
+            {
+                Size = new Size(20, 18),
+                AutoSize = false,
+                BackColor = Config.BG,
+                Image = CopyIcon(),
+                Cursor = Cursors.Hand,
+            };
+            _copyBtn.Click += (s, e) => CopyClick();
+            _toolbar.Controls.Add(_copyBtn);
+
+            _saveBtn = new Label
+            {
+                Size = new Size(20, 18),
+                AutoSize = false,
+                BackColor = Config.BG,
+                Image = SaveIcon(),
+                Cursor = Cursors.Hand,
+                Visible = false,
+            };
+            _saveBtn.Click += (s, e) => SaveClick();
+            _toolbar.Controls.Add(_saveBtn);
+
+            MouseEventHandler drag = (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                var sp = ((Control)s).PointToScreen(e.Location);
+                int hit = GetResizeHit(sp.X, sp.Y);
+                if (hit != 0) { NativeMethods.ReleaseCapture(); NativeMethods.SendMessage(Handle, 0xA1, hit, 0); return; }
+                // 实际拖动后才固定；单纯点击标题不固定
+                var before = Location;
+                NativeMethods.ReleaseCapture(); NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
+                if (Location != before && !_pinned) { _pinned = true; _pinBtn.Image = PinIcon(true); Padding = new Padding(1); Invalidate(); }
+            };
+            _toolbar.MouseDown += drag;
+            _iconLbl.MouseDown += drag;
+            _nameLbl.MouseDown += drag;
+            _metaLbl.MouseDown += drag;
+            foreach (var ctl in new Control[] { _toolbar, _iconLbl, _nameLbl, _metaLbl })
+            {
+                ctl.MouseMove += (s, e) => { var c = (Control)s; var sp = c.PointToScreen(e.Location); UpdateResizeCursor(c, sp.X, sp.Y); };
+                ctl.MouseLeave += (s, e) => { ((Control)s).Cursor = null; };
+            }
+            BindResize(_scrollPanel);
+            Resize += (s, e) =>
+            {
+                _grip.Location = new Point(ClientSize.Width - _grip.Width - 2, ClientSize.Height - _grip.Height - 2);
+                if (!IsHandleCreated) return;
+                _toolbar.Location = new Point(0, 0);
+                _toolbar.Size = new Size(ClientSize.Width, 34);
+                _scrollPanel.Location = new Point(0, 34);
+                _scrollPanel.Size = new Size(ClientSize.Width, ClientSize.Height - 34);
+                UpdateToolbarBtnPos();
+            };
+            UpdateToolbarBtnPos();
         }
 
-        private void UpdatePinPos()
+        private void BindResize(Control c)
         {
-            _pinBtn.Location = new Point(ClientSize.Width - _pinBtn.Width - 2, 2);
+            c.MouseDown += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                var sp = ((Control)s).PointToScreen(e.Location);
+                int hit = GetResizeHit(sp.X, sp.Y);
+                if (hit != 0) { Program.DebugLog("[pv-resize] down hit=0x" + hit.ToString("X") + " at " + sp.X + "," + sp.Y); NativeMethods.ReleaseCapture(); NativeMethods.SendMessage(Handle, 0xA1, hit, 0); }
+            };
+            c.MouseMove += (s, e) =>
+            {
+                var sp = ((Control)s).PointToScreen(e.Location);
+                UpdateResizeCursor((Control)s, sp.X, sp.Y);
+            };
+            c.MouseLeave += (s, e) => { ((Control)s).Cursor = null; };
+        }
+
+        private void UpdateResizeCursor(Control c, int x, int y)
+        {
+            int b = 6, br = 20;
+            Cursor cur;
+            if (x <= Left + b && y <= Top + b) cur = Cursors.SizeNWSE;
+            else if (x >= Right - b && y <= Top + b) cur = Cursors.SizeNESW;
+            else if (x <= Left + b && y >= Bottom - b) cur = Cursors.SizeNESW;
+            else if (x >= Right - br && y >= Bottom - br) cur = Cursors.SizeNWSE;
+            else if (x <= Left + b) cur = Cursors.SizeWE;
+            else if (x >= Right - b) cur = Cursors.SizeWE;
+            else if (y <= Top + b) cur = Cursors.SizeNS;
+            else if (y >= Bottom - b) cur = Cursors.SizeNS;
+            else cur = null;
+            Program.DebugLog("[pv-resize] move at " + x + "," + y + " -> " + (cur == null ? "null" : cur.ToString()));
+            c.Cursor = cur;
+        }
+
+        private int GetResizeHit(int x, int y)
+        {
+            int b = 6, br = 20;
+            if (x <= Left + b && y <= Top + b) return 0x0D;
+            if (x >= Right - b && y <= Top + b) return 0x0E;
+            if (x <= Left + b && y >= Bottom - b) return 0x10;
+            if (x >= Right - br && y >= Bottom - br) return 0x11;
+            if (x <= Left + b) return 0x0A;
+            if (x >= Right - b) return 0x0B;
+            if (y <= Top + b) return 0x0C;
+            if (y >= Bottom - b) return 0x0F;
+            return 0;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+        }
+
+        // 右下角缩放手柄：透明背景 + 半透明斜线，悬停时增亮
+        private class SizeGripCtl : Control
+        {
+            private bool _hover;
+
+            public SizeGripCtl()
+            {
+                SetStyle(ControlStyles.SupportsTransparentBackColor
+                    | ControlStyles.UserPaint
+                    | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer, true);
+                BackColor = Color.Transparent;
+            }
+
+            protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                int a = _hover ? 230 : 110;
+                using (var pen = new Pen(Color.FromArgb(a, Color.White), 1.6f))
+                {
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int o = 4 + i * 5;
+                        g.DrawLine(pen, Width - o, Height - 2, Width - 2, Height - o);
+                    }
+                }
+            }
+        }
+
+
+        private void UpdateToolbarBtnPos()
+        {
+            int btnY = 8;
+            _pinBtn.Location = new Point(_toolbar.Width - _pinBtn.Width - 4, btnY);
+            _copyBtn.Location = new Point(_pinBtn.Left - _copyBtn.Width - 2, btnY);
+            int anchor = _copyBtn.Left;
+            if (_saveBtn.Visible)
+            {
+                _saveBtn.Location = new Point(_copyBtn.Left - _saveBtn.Width - 2, btnY);
+                anchor = _saveBtn.Left;
+            }
+            using (var g = _metaLbl.CreateGraphics())
+            {
+                var sz = g.MeasureString(_metaLbl.Text, _metaLbl.Font);
+                int metaW = Math.Min((int)sz.Width + 6, anchor - 34 - 4);
+                if (metaW < 0) metaW = 0;
+                _metaLbl.Size = new Size(metaW, 18);
+                _metaLbl.Location = new Point(anchor - metaW - 4, btnY + 1);
+            }
+            int nameW = _metaLbl.Left - 34 - 2;
+            if (nameW < 0) nameW = 0;
+            _nameLbl.Location = new Point(34, btnY + 1);
+            _nameLbl.Size = new Size(nameW, 18);
+        }
+
+        public void SetHeader(string name, string meta, string iconText, Color iconColor)
+        {
+            _nameLbl.Text = name;
+            _metaLbl.Text = meta;
+            _iconLbl.Text = iconText;
+            _iconLbl.BackColor = iconColor;
+        }
+
+
+        internal static bool RecycleFile(string path)
+        {
+            try
+            {
+                var op = new NativeMethods.SHFILEOPSTRUCTW();
+                op.hwnd = IntPtr.Zero;
+                op.wFunc = NativeMethods.FO_DELETE;
+                op.pFrom = path + "\0\0";
+                op.pTo = null;
+                op.fFlags = NativeMethods.FOF_ALLOWUNDO | NativeMethods.FOF_NOCONFIRMATION | NativeMethods.FOF_SILENT | NativeMethods.FOF_NOERRORUI;
+                return NativeMethods.SHFileOperationW(ref op) == 0;
+            }
+            catch { return false; }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+
+            if (_unpinCloseTimer != null) { _unpinCloseTimer.Stop(); _unpinCloseTimer.Dispose(); _unpinCloseTimer = null; }
+            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
+            base.OnFormClosed(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+
+            base.OnPaint(e);
         }
 
         private void TogglePin()
         {
             _pinned = !_pinned;
+            _pinBtn.Image = PinIcon(_pinned);
             if (_pinned)
             {
-                FormBorderStyle = FormBorderStyle.SizableToolWindow;
-                Text = I18n.T("preview");
-                _pinBtn.Visible = false;
-
+                Padding = new Padding(1);
+                Invalidate();
             }
             else
             {
-                FormBorderStyle = FormBorderStyle.None;
-                _pinBtn.Visible = true;
-
-                UpdatePinPos();
+                Padding = new Padding(0);
+                Invalidate();
+                if (_unpinCloseTimer == null)
+                {
+                    _unpinCloseTimer = new Timer { Interval = 200 };
+                    _unpinCloseTimer.Tick += (s, e) =>
+                    {
+                        NativeMethods.POINT pt;
+                        NativeMethods.GetCursorPos(out pt);
+                        if (!ContainsPoint(pt.X, pt.Y))
+                        {
+                            _unpinCloseTimer.Stop();
+                            try { Close(); } catch { }
+                        }
+                    };
+                }
+                _unpinCloseTimer.Start();
             }
         }
 
@@ -191,6 +497,141 @@ namespace HoverExplorer
         {
             if (disposing && _img != null) _img.Dispose();
             base.Dispose(disposing);
+        }
+
+        internal static Image PinIcon(bool pinned)
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                var c = Config.FG;
+                using (var p = new Pen(c, 1.4f))
+                using (var b = new SolidBrush(c))
+                {
+                    g.DrawEllipse(p, 3, 2, 8, 8);
+                    if (pinned) g.FillEllipse(b, 3, 2, 8, 8);
+                    g.DrawLine(p, 7, 10, 7, 14);
+                    g.DrawLine(p, 6, 14, 8, 14);
+                }
+            }
+            return bmp;
+        }
+
+        internal static Image TrashIcon()
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var p = new Pen(Config.FG, 1.4f))
+                {
+                    g.DrawLine(p, 2, 4, 14, 4);
+                    g.DrawLine(p, 4, 2, 12, 2);
+                    g.DrawLine(p, 4, 2, 4, 4);
+                    g.DrawLine(p, 12, 2, 12, 4);
+                    g.DrawLine(p, 3.5f, 4, 4.5f, 14);
+                    g.DrawLine(p, 12.5f, 4, 11.5f, 14);
+                    g.DrawLine(p, 4.5f, 14, 11.5f, 14);
+                    g.DrawLine(p, 7, 6, 7, 12);
+                    g.DrawLine(p, 10, 6, 10, 12);
+                }
+            }
+            return bmp;
+        }
+
+        private static Image CopyIcon()
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var p = new Pen(Config.FG, 1.4f))
+                {
+                    g.DrawRectangle(p, 2, 2, 8, 10);
+                    g.DrawRectangle(p, 5, 4, 8, 10);
+                }
+            }
+            return bmp;
+        }
+
+        private static Image SaveIcon()
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var p = new Pen(Config.FG, 1.4f))
+                using (var b = new SolidBrush(Config.FG))
+                {
+                    g.DrawRectangle(p, 2, 2, 12, 12);
+                    g.FillRectangle(b, 4, 3, 8, 3);
+                    g.DrawRectangle(p, 5, 9, 6, 4);
+                }
+            }
+            return bmp;
+        }
+
+        private void CopyClick()
+        {
+            try
+            {
+                var rtb = _content as RichTextBox;
+                if (rtb != null && rtb.SelectionLength > 0)
+                {
+                    Clipboard.SetText(rtb.SelectedText);
+                    ShowToast("已复制文本");
+                    return;
+                }
+                if (!string.IsNullOrEmpty(FilePath))
+                {
+                    var files = new System.Collections.Specialized.StringCollection();
+                    files.Add(FilePath);
+                    Clipboard.SetFileDropList(files);
+                    ShowToast("已复制文件");
+                }
+            }
+            catch { }
+        }
+
+        private void ShowToast(string msg)
+        {
+            var t = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                StartPosition = FormStartPosition.Manual,
+                BackColor = Config.BG,
+                ShowInTaskbar = false,
+                TopMost = true,
+                Size = new Size(60, 22),
+            };
+            var lbl = new Label { Text = msg, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Config.FG, BackColor = Config.BG, Font = new Font("Microsoft YaHei", 9) };
+            t.Controls.Add(lbl);
+            t.Location = new Point(Left + (Width - t.Width) / 2, Top + 34);
+            t.Show();
+            var tm = new Timer { Interval = 800 };
+            tm.Tick += (s, e) => { tm.Stop(); tm.Dispose(); t.Close(); t.Dispose(); };
+            tm.Start();
+        }
+
+        private void SaveClick()
+        {
+            try
+            {
+                var rtb = _content as RichTextBox;
+                if (rtb != null && !string.IsNullOrEmpty(FilePath))
+                {
+                    System.IO.File.WriteAllText(FilePath, rtb.Text);
+                    _textDirty = false;
+                    _saveBtn.Visible = false;
+                    UpdateToolbarBtnPos();
+                }
+            }
+            catch { }
         }
     }
 
@@ -266,6 +707,11 @@ namespace HoverExplorer
         private Point _dragStart;
         private RowLabel _dragRow;
         private RowLabel _activeDirRow;
+        private bool _pinned;
+        private Label _pinBtn;
+        private Label _rowDelBtn;
+
+        public bool Pinned { get { return _pinned; } }
 
         public PopupForm(int level, Action<int, string, int> onOpenSub, Func<int, int, string> dropResolver, Action<int> onScheduleCloseAfter)
         {
@@ -279,7 +725,36 @@ namespace HoverExplorer
             StartPosition = FormStartPosition.Manual;
             BackColor = Config.BG;
             DoubleBuffered = true;
+            AllowDrop = true;
+            DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
+            DragDrop += (s, e) =>
+            {
+                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
+                if (files == null || string.IsNullOrEmpty(_path)) return;
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var dest = Path.Combine(_path, Path.GetFileName(f));
+                        if (Directory.Exists(f)) CopyDirectory(f, dest);
+                        else File.Copy(f, dest, false);
+                    }
+                    catch { }
+                }
+                ShowPanel(_path, Left, Top);
+            };
         }
+
+        private static void CopyDirectory(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), false);
+            foreach (var d in Directory.GetDirectories(src))
+                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        private static readonly Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -287,7 +762,11 @@ namespace HoverExplorer
             Win11.Apply(Handle, Config.Theme != "light", Config.Border);
         }
 
-        private static readonly Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+
+        }
 
         private static Image GetIcon(bool isDir, string ext)
         {
@@ -364,6 +843,18 @@ namespace HoverExplorer
                 Controls.Add(sortFlow);
                 curY += 28;
 
+                _pinBtn = new Label
+                {
+                    Size = new Size(20, 18),
+                    AutoSize = false,
+                    Location = new Point(_panelW - 26, 7),
+                    BackColor = Config.BG,
+                    Image = PreviewForm.PinIcon(_pinned),
+                    Cursor = Cursors.Hand,
+                };
+                _pinBtn.Click += (s, e) => TogglePinPopup();
+                Controls.Add(_pinBtn);
+
                 var searchBorder = new Panel { BackColor = Config.Border, Location = new Point(6, curY), Size = new Size(_panelW - 12, 22) };
                 _searchBox = new TextBox
                 {
@@ -383,6 +874,21 @@ namespace HoverExplorer
                 Controls.Add(searchBorder);
                 curY += 22 + 2;
                 _headH = curY;
+
+                // 实际拖动后才固定；单纯点击不固定
+                MouseEventHandler drag = (s, e) =>
+                {
+                    if (e.Button != MouseButtons.Left) return;
+                    var before = Location;
+                    NativeMethods.ReleaseCapture(); NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
+                    if (Location != before && !_pinned) TogglePinPopup();
+                };
+                sortFlow.MouseDown += drag;
+                searchBorder.MouseDown += drag;
+                // 顶部区域空白处右键 = 选项菜单
+                MouseEventHandler blankMenu = (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
+                sortFlow.MouseUp += blankMenu;
+                searchBorder.MouseUp += blankMenu;
             }
             else
             {
@@ -390,7 +896,34 @@ namespace HoverExplorer
             }
 
             _listPanel = new Panel { Location = new Point(0, curY), BackColor = Config.BG };
+            // 列表空白处右键弹出选项菜单（托盘图标隐藏时的入口）
+            _listPanel.MouseUp += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Right && Program.TrayMenu != null)
+                { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); }
+            };
             Controls.Add(_listPanel);
+            Win11.ApplyScrollTheme(_listPanel, Config.Theme != "light");
+
+            _rowDelBtn = new Label
+            {
+                Size = new Size(18, 18),
+                AutoSize = false,
+                BackColor = Config.BgHover,
+                Image = PreviewForm.TrashIcon(),
+                Cursor = Cursors.Hand,
+                Visible = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+            };
+            _rowDelBtn.Click += (s, e) =>
+            {
+                var p = _rowDelBtn.Tag as string;
+                if (string.IsNullOrEmpty(p)) return;
+                if (PreviewForm.RecycleFile(p)) ShowPanel(_path, Left, Top);
+            };
+
+            _listPanel.Controls.Add(_rowDelBtn);
+            _rowDelBtn.BringToFront();
 
             var font = new Font(Config.FontName, Config.FontSize);
             int maxW = 200;
@@ -445,6 +978,7 @@ namespace HoverExplorer
                     if (c is Panel && c.BackColor == Config.Border) c.Width = _panelW - 12;
                 }
                 if (_searchBox != null) _searchBox.Width = _panelW - 14;
+                if (_pinBtn != null) { _pinBtn.Location = new Point(_panelW - 26, 7); _pinBtn.BringToFront(); }
             }
 
             int rowH = 24;
@@ -535,6 +1069,7 @@ namespace HoverExplorer
             }
             _listPanel.Size = new Size(_panelW, needH - curY);
             ClientSize = new Size(_panelW, needH);
+            if (_pinBtn != null) _pinBtn.BringToFront();
             ResumeLayout(false);
             PerformLayout();
 
@@ -543,7 +1078,8 @@ namespace HoverExplorer
             ClampPos(ref x, ref y);
             Location = new Point(x, y);
 
-            MouseClick += (s, e) => { if (e.Button == MouseButtons.Right) PopupSortMenu(e); };
+            // 空白处右键 = 选项菜单（排序功能已由顶部排序按钮覆盖）
+            MouseClick += (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
             return true;
         }
 
@@ -648,6 +1184,13 @@ namespace HoverExplorer
         private void OnRowEnter(RowLabel row)
         {
             row.BackColor = Config.BgHover;
+            if (_rowDelBtn != null)
+            {
+                _rowDelBtn.Tag = row.Full;
+                _rowDelBtn.Location = new Point(row.Width - 20, row.Top + (row.Height - 18) / 2);
+                _rowDelBtn.Visible = true;
+                _rowDelBtn.BringToFront();
+            }
             NativeMethods.POINT _ept; NativeMethods.GetCursorPos(out _ept);
             bool canPv = !row.IsDir && Config.PreviewFiles && PreviewProvider.CanPreview(row.Full);
             Program.DebugLog("[row] enter level=" + _level + " lang=" + I18n.Lang + " " + (row.IsDir ? "DIR " : "FILE ") + row.Name + " mouse=" + _ept.X + "," + _ept.Y + " previewFiles=" + Config.PreviewFiles + " canPreview=" + canPv);
@@ -657,8 +1200,18 @@ namespace HoverExplorer
 
         private void OnRowLeave(RowLabel row)
         {
+            bool onDel = false;
+            if (_rowDelBtn != null && _rowDelBtn.Visible)
+            {
+                NativeMethods.POINT _dpt; NativeMethods.GetCursorPos(out _dpt);
+                var dr = _rowDelBtn.RectangleToScreen(_rowDelBtn.ClientRectangle);
+                onDel = _dpt.X >= dr.Left && _dpt.X <= dr.Right && _dpt.Y >= dr.Top && _dpt.Y <= dr.Bottom;
+                if (!onDel) _rowDelBtn.Visible = false;
+            }
+            row.BackColor = row.Selected ? Config.BgSel : Config.BG;
             NativeMethods.POINT _lpt; NativeMethods.GetCursorPos(out _lpt);
-            Program.DebugLog("[row] leave level=" + _level + " lang=" + I18n.Lang + " " + (row.IsDir ? "DIR " : "FILE ") + row.Name + " mouse=" + _lpt.X + "," + _lpt.Y);
+            Program.DebugLog("[row] leave level=" + _level + " lang=" + I18n.Lang + " " + (row.IsDir ? "DIR " : "FILE ") + row.Name + " mouse=" + _lpt.X + "," + _lpt.Y + " onDel=" + onDel);
+            if (onDel) return;
             if (row.IsDir)
             {
                 CancelHover();
@@ -739,10 +1292,11 @@ namespace HoverExplorer
 
         private void SchedulePreview(RowLabel row)
         {
-            Program.DebugLog("[panel-preview] schedule level=" + _level + " lang=" + I18n.Lang + " " + row.Full + " delay=" + Config.PreviewDelay + " (hadTimer=" + (_previewTimer != null) + " hadForm=" + (_previewForm != null) + ")");
+            if (_previewForm != null && _previewPath == row.Full) { Program.DebugLog("[panel-preview] keep-existing level=" + _level + " " + row.Full); return; }
+            Program.DebugLog("[panel-preview] schedule level=" + _level + " lang=" + I18n.Lang + " " + row.Full + " delay=" + Config.HoverDelayMs + " (hadTimer=" + (_previewTimer != null) + " hadForm=" + (_previewForm != null) + ")");
             CancelPreview();
             _previewPath = row.Full;
-            _previewTimer = new Timer { Interval = Config.PreviewDelay };
+            _previewTimer = new Timer { Interval = Config.HoverDelayMs };
             _previewTimer.Tick += (s, e) => { _previewTimer.Stop(); _previewTimer.Dispose(); _previewTimer = null; Program.DebugLog("[panel-preview] timer-fired level=" + _level + " " + row.Full); ShowPreview(row); };
             _previewTimer.Start();
         }
@@ -755,6 +1309,8 @@ namespace HoverExplorer
             CancelPreviewClose();
             ClosePreviewForm();
         }
+
+        public void ClosePreviewIfAny() { CancelPreview(); }
 
         private void SchedulePreviewClose()
         {
@@ -776,7 +1332,8 @@ namespace HoverExplorer
                 bool inPv = _previewForm != null && _previewForm.ContainsPoint(pt.X, pt.Y);
                 bool pinned = _previewForm != null && _previewForm.Pinned;
                 Program.DebugLog("[panel-preview] close-check level=" + _level + " mouse=" + pt.X + "," + pt.Y + " inPreview=" + inPv + " pinned=" + pinned + " formAlive=" + (_previewForm != null));
-                if (_previewForm != null && !pinned && inPv)
+                if (pinned) return;
+                if (_previewForm != null && inPv)
                     SchedulePreviewClose();
                 else
                     ClosePreviewForm();
@@ -791,8 +1348,9 @@ namespace HoverExplorer
 
         private void ClosePreviewForm()
         {
-            if (_previewForm != null && _previewForm.Pinned) { Program.DebugLog("[panel-preview] CLOSE skipped (pinned) level=" + _level); return; }
-            if (_previewForm != null) { Program.DebugLog("[panel-preview] CLOSE level=" + _level + " form was at " + _previewForm.Left + "," + _previewForm.Top + " " + _previewForm.Width + "x" + _previewForm.Height); try { _previewForm.Close(); _previewForm.Dispose(); } catch { } _previewForm = null; }
+            if (_previewForm == null) return;
+            if (_previewForm.Pinned) { Program.DebugLog("[panel-preview] CLOSE detach (pinned) level=" + _level); _previewForm = null; return; }
+            Program.DebugLog("[panel-preview] CLOSE level=" + _level + " form was at " + _previewForm.Left + "," + _previewForm.Top + " " + _previewForm.Width + "x" + _previewForm.Height); try { _previewForm.Close(); _previewForm.Dispose(); } catch { } _previewForm = null;
         }
 
         private void ShowPreview(RowLabel row)
@@ -817,11 +1375,24 @@ namespace HoverExplorer
                             else
                                 _previewForm = new PreviewForm(result.Image);
                         }
+                        else if (result.Kind == PreviewResult.KindEnum.Media)
+                        {
+                            var ctl = MediaPreview.MediaPlayer(full, result.IsVideo, result.DisplayW, result.DisplayH);
+                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                        }
+                        else if (result.Kind == PreviewResult.KindEnum.SvgHtml)
+                        {
+                            var ctl = MediaPreview.SvgBrowserPanel(full);
+                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                        }
                         else
                         {
                             _previewForm = new PreviewForm(result.Text, result.Size);
                         }
                         PositionPreview(row);
+                        _previewForm.FilePath = full;
+                        ApplyHeader(_previewForm, full);
+
                         _previewForm.Show();
                         NativeMethods.POINT _spt; NativeMethods.GetCursorPos(out _spt);
                         Program.DebugLog("[panel-preview] SHOW level=" + _level + " " + full + " at " + _previewForm.Left + "," + _previewForm.Top + " size " + _previewForm.Width + "x" + _previewForm.Height + " mouse=" + _spt.X + "," + _spt.Y);
@@ -851,13 +1422,14 @@ namespace HoverExplorer
 
         public static void ScheduleFilePreview(string full, Point mouse)
         {
+
             CancelFilePreview();
             if (!Config.PreviewFiles) return;
             if (!PreviewProvider.CanPreview(full)) return;
             _extRetryCount = 0;
             _extPreviewPath = full;
             Program.DebugLog("[preview] schedule " + full);
-            _extPreviewTimer = new Timer { Interval = Config.PreviewDelay };
+            _extPreviewTimer = new Timer { Interval = Config.HoverDelayMs };
             _extPreviewTimer.Tick += delegate(object s, EventArgs e)
             {
                 ((Timer)s).Stop(); ((Timer)s).Dispose(); _extPreviewTimer = null;
@@ -907,7 +1479,33 @@ namespace HoverExplorer
 
         private static void CloseExtPreviewForm()
         {
-            if (_extPreviewForm != null) { Program.DebugLog("[preview] CLOSE form"); try { _extPreviewForm.Close(); _extPreviewForm.Dispose(); } catch { } _extPreviewForm = null; }
+            if (_extPreviewForm == null) return;
+            if (_extPreviewForm.Pinned) { Program.DebugLog("[preview] CLOSE detach (pinned)"); _extPreviewForm = null; return; }
+            Program.DebugLog("[preview] CLOSE form"); try { _extPreviewForm.Close(); _extPreviewForm.Dispose(); } catch { } _extPreviewForm = null;
+        }
+
+
+        private static void ApplyHeader(PreviewForm form, string full)
+        {
+            string name = Path.GetFileName(full);
+            string ext = Path.GetExtension(full).TrimStart('.').ToUpperInvariant();
+            long size = 0;
+            try { size = new FileInfo(full).Length; } catch { }
+            string meta = ext + " · " + FormatSize(size);
+            Color iconColor; string iconText;
+            switch (ext)
+            {
+                case "MP3": case "WAV": case "WMA": case "M4A": iconColor = ColorTranslator.FromHtml("#e5567a"); iconText = "♪"; break;
+                case "MP4": case "MKV": case "AVI": case "MOV": case "WMV": iconColor = ColorTranslator.FromHtml("#9b5de5"); iconText = "▶"; break;
+                case "SVG": iconColor = ColorTranslator.FromHtml("#3b8eea"); iconText = "S"; break;
+                case "PNG": case "JPG": case "JPEG": case "GIF": case "BMP": iconColor = ColorTranslator.FromHtml("#3b8eea"); iconText = "▣"; break;
+                case "ZIP": case "RAR": case "7Z": iconColor = ColorTranslator.FromHtml("#c98a2b"); iconText = "▤"; break;
+                case "JSON": iconColor = ColorTranslator.FromHtml("#d9a21b"); iconText = "{}"; break;
+                case "CSS": iconColor = ColorTranslator.FromHtml("#2fa66a"); iconText = "#"; break;
+                case "MD": iconColor = ColorTranslator.FromHtml("#4a6cf7"); iconText = "M"; break;
+                default: iconColor = Config.PlaceholderFg; iconText = ext.Length > 3 ? ext.Substring(0, 3) : ext; break;
+            }
+            form.SetHeader(name, meta, iconText, iconColor);
         }
 
         private static void LoadFilePreview(string full, Point mouse)
@@ -925,7 +1523,17 @@ namespace HoverExplorer
                     {
                         if (full != _extPreviewPath) { if (result.Image != null) result.Image.Dispose(); return; }
                         CloseExtPreviewForm();
-                        if (result.Kind == PreviewResult.KindEnum.Image)
+                        if (result.Kind == PreviewResult.KindEnum.Media)
+                        {
+                            var ctl = MediaPreview.MediaPlayer(full, result.IsVideo, result.DisplayW, result.DisplayH);
+                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                        }
+                        else if (result.Kind == PreviewResult.KindEnum.SvgHtml)
+                        {
+                            var ctl = MediaPreview.SvgBrowserPanel(full);
+                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                        }
+                        else if (result.Kind == PreviewResult.KindEnum.Image)
                         {
                             if (result.IsGif)
                                 _extPreviewForm = new PreviewForm(result.Image, result.DisplayW, result.DisplayH);
@@ -937,6 +1545,9 @@ namespace HoverExplorer
                             _extPreviewForm = new PreviewForm(result.Text, result.Size);
                         }
                         PositionExtPreview(mouse);
+                        _extPreviewForm.FilePath = full;
+                        ApplyHeader(_extPreviewForm, full);
+
                         _extPreviewForm.Show();
                         Program.DebugLog("[preview] SHOW " + full + " at " + _extPreviewForm.Left + "," + _extPreviewForm.Top + " size " + _extPreviewForm.Width + "x" + _extPreviewForm.Height);
                     }, null);
@@ -965,7 +1576,7 @@ namespace HoverExplorer
         private static void PositionExtPreview(Point mouse)
         {
             if (_extPreviewForm == null) return;
-            int x = mouse.X + 20, y = mouse.Y + 16;
+            int x = mouse.X + 20, y = mouse.Y + 2;
             int pw = _extPreviewForm.Width, ph = _extPreviewForm.Height;
             var hpt = new NativeMethods.POINT { X = mouse.X, Y = mouse.Y };
             var hmon = NativeMethods.MonitorFromPoint(hpt, 2);
@@ -1152,27 +1763,6 @@ namespace HoverExplorer
             m.Show(row, e.Location);
         }
 
-        private void PopupSortMenu(MouseEventArgs e)
-        {
-            var m = new ContextMenuStrip { BackColor = Config.BG, ForeColor = Config.FG, Font = new Font(Config.FontName, Config.FontSize) };
-            m.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
-            foreach (var kv in Config.SortLabels)
-            {
-                string mark = SortMode == kv.Key ? "● " : "   ";
-                var item = new ToolStripMenuItem(mark + kv.Value);
-                string mode = kv.Key;
-                item.Click += (s, ev) => SetSort(mode);
-                m.Items.Add(item);
-            }
-            m.Items.Add(new ToolStripSeparator());
-            var descItem = new ToolStripMenuItem(SortDesc ? I18n.T("sort_asc") : I18n.T("sort_desc"));
-            descItem.Click += (s, ev) => ToggleSortDesc();
-            m.Items.Add(descItem);
-            _menuOpen = true;
-            m.Closed += (s, ev) => _menuOpen = false;
-            m.Show(this, e.Location);
-        }
-
         private void Rename(RowLabel row, MouseEventArgs e)
         {
             string oldName = Path.GetFileName(row.Full);
@@ -1256,7 +1846,7 @@ namespace HoverExplorer
             return Left <= x && x <= Left + Width && Top <= y && y <= Top + Height;
         }
 
-        public bool MenuOpen { get { return _menuOpen; } }
+        public bool MenuOpen { get { return _menuOpen; } set { _menuOpen = value; } }
         // 模态对话框（删除确认/重命名等）显示期间置位，主循环应暂停自动关闭
         public bool ModalOpen;
         public bool IsDragging { get { return _dragging; } }
@@ -1264,11 +1854,26 @@ namespace HoverExplorer
 
         public void ClosePanel()
         {
-            Program.DebugLog("[panel] ClosePanel level=" + _level + " path=" + _path);
+            Program.DebugLog("[panel] ClosePanel level=" + _level + " path=" + _path + " pinned=" + _pinned);
+            if (_pinned) return;
             CancelHover();
 
             CancelPreview();
             if (IsHandleCreated) try { Close(); Dispose(); } catch { }
+        }
+
+        private void TogglePinPopup()
+        {
+            _pinned = !_pinned;
+            if (_pinBtn != null) _pinBtn.Image = PreviewForm.PinIcon(_pinned);
+        }
+
+        // 面板显示期间维持 TOPMOST（不激活）：防止被资源管理器等前台窗口盖住
+        public void EnsureTopmost()
+        {
+            if (!IsHandleCreated || !Visible) return;
+            NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
         }
     }
 

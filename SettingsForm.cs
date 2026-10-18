@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 
 namespace HoverExplorer
@@ -16,6 +17,7 @@ namespace HoverExplorer
         private Button _okBtn;
         private Button _cancelBtn;
         private Label _hintLbl;
+        private NumericUpDown _hoverDelayBox;
 
         private int _modifiers;
         private int _key;
@@ -24,6 +26,7 @@ namespace HoverExplorer
         public bool HotkeyEnabled { get; private set; }
         public int HotkeyModifiers { get; private set; }
         public int HotkeyKey { get; private set; }
+        public double HoverDelaySetting { get; private set; }
 
         public SettingsForm()
         {
@@ -33,7 +36,7 @@ namespace HoverExplorer
             MaximizeBox = false;
             MinimizeBox = false;
             Width = 380;
-            Height = 300;
+            Height = 500;
             ShowInTaskbar = false;
 
             HotkeyEnabled = Config.HotkeyEnabled;
@@ -126,6 +129,31 @@ namespace HoverExplorer
             UpdateCurrent();
             y += 35;
 
+            var hoverTitleLbl = new Label
+            {
+                Text = I18n.T("hover_delay"),
+                Location = new Point(20, y + 4),
+                AutoSize = true,
+                Font = new Font(Config.FontName, 11, FontStyle.Bold)
+            };
+            Controls.Add(hoverTitleLbl);
+            y += 28;
+
+            _hoverDelayBox = new NumericUpDown
+            {
+                Location = new Point(20, y),
+                Width = 80,
+                Minimum = 0.1m,
+                Maximum = 3.0m,
+                Increment = 0.05m,
+                DecimalPlaces = 2,
+                Value = (decimal)Config.HoverDelay,
+            };
+            Controls.Add(_hoverDelayBox);
+            var hoverHintLbl = new Label { Text = I18n.T("hover_delay_desc"), Location = new Point(110, y + 4), AutoSize = true, ForeColor = Config.PlaceholderFg, Font = new Font(Config.FontName, 9) };
+            Controls.Add(hoverHintLbl);
+            y += 35;
+
             _okBtn = new Button { Text = I18n.T("settings_ok"), Location = new Point(170, y), Size = new Size(85, 28) };
             _okBtn.Click += (s, e) =>
             {
@@ -134,6 +162,7 @@ namespace HoverExplorer
                                 | (_altChk.Checked ? NativeMethods.MOD_ALT : 0)
                                 | (_shiftChk.Checked ? NativeMethods.MOD_SHIFT : 0);
                 HotkeyKey = _key;
+                HoverDelaySetting = (double)_hoverDelayBox.Value;
                 DialogResult = DialogResult.OK;
                 Close();
             };
@@ -141,6 +170,45 @@ namespace HoverExplorer
             _cancelBtn.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(_okBtn);
             Controls.Add(_cancelBtn);
+
+            // 赞赏：二维码 + 微信号（点击复制）
+            EventHandler copyWx = (s, e) =>
+            {
+                try { Clipboard.SetText("jtugqivi"); MessageBox.Show(I18n.T("donated"), I18n.T("donate"), MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
+            };
+            int dy = y + 38;
+            int linkX = 20, linkY = dy;
+            // 二维码为嵌入资源，不再依赖外部文件
+            Image qrImg = null;
+            try
+            {
+                var s = typeof(SettingsForm).Assembly.GetManifestResourceStream("HoverExplorer.donate_qr.png");
+                if (s != null) { qrImg = Image.FromStream(s); }
+            }
+            catch { }
+            if (qrImg != null)
+            {
+                var qr = new PictureBox
+                {
+                    Location = new Point(20, dy),
+                    Size = new Size(150, 150),
+                    SizeMode = PictureBoxSizeMode.Zoom,
+                    Image = qrImg,
+                    Cursor = Cursors.Hand,
+                };
+                qr.Click += copyWx;
+                Controls.Add(qr);
+                linkX = 180; linkY = dy + 64;
+            }
+            var donateLbl = new LinkLabel
+            {
+                Text = "vx:jtugqivi",
+                Location = new Point(linkX, linkY),
+                AutoSize = true,
+                Font = new Font(Config.FontName, 9)
+            };
+            donateLbl.Click += copyWx;
+            Controls.Add(donateLbl);
 
             AcceptButton = _okBtn;
             CancelButton = _cancelBtn;
@@ -219,6 +287,8 @@ namespace HoverExplorer
             {
                 c.BackColor = Config.BG;
                 c.ForeColor = Config.FG;
+                var link = c as LinkLabel;
+                if (link != null) link.LinkColor = Config.Accent;
             }
             _keyBox.BackColor = Config.BgHover;
             _keyBox.ForeColor = Config.FG;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Drawing;
@@ -26,9 +26,17 @@ namespace HoverExplorer
         { ".lnk" };
         public static readonly HashSet<string> EpubExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".epub" };
+        public static readonly HashSet<string> AudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".mp3", ".wav", ".wma", ".m4a" };
+        public static readonly HashSet<string> VideoExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".mp4", ".mkv", ".avi", ".mov", ".wmv" };
+        public static readonly HashSet<string> SvgExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".svg" };
         public static int PreviewDelay = 400;
         public static int PreviewMax = 240;
         public static double HoverDelay = 0.30;
+        // 文件预览触发延时跟随用户的悬停延时设置（秒 -> 毫秒）
+        public static int HoverDelayMs { get { return Math.Max(50, (int)(HoverDelay * 1000)); } }
         public static int SubHoverDelay = 150;
         public static double CloseDelay = 0.35;
         public static int CheckInterval = 40;
@@ -39,6 +47,7 @@ namespace HoverExplorer
         public static bool PreviewFiles = true;
         public static bool DebugLog = false;
         public static bool HideTooltip = false;
+        public static bool HideTrayIcon = false;
         public static bool HotkeyEnabled = true;
         public static int HotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
         public static int HotkeyKey = 81; // Q
@@ -46,7 +55,7 @@ namespace HoverExplorer
         public static string Theme = "dark";
         public static readonly string FontName = "Microsoft YaHei UI";
         public static readonly float FontSize = 10f;
-        public static Color BG, FG, BgHover, BgDir, FgDir, DropHighlight, BgSel, Border, PlaceholderFg;
+        public static Color BG, FG, BgHover, BgDir, FgDir, DropHighlight, BgSel, Border, PlaceholderFg, Accent;
 
         static Config()
         {
@@ -67,6 +76,7 @@ namespace HoverExplorer
                 BgSel = ColorTranslator.FromHtml("#6aa9ff");
                 Border = ColorTranslator.FromHtml("#42424a");
                 PlaceholderFg = ColorTranslator.FromHtml("#8d8d99");
+                Accent = ColorTranslator.FromHtml("#6aa9ff");
             }
             else
             {
@@ -78,6 +88,7 @@ namespace HoverExplorer
                 BgSel = ColorTranslator.FromHtml("#0067c0");
                 Border = ColorTranslator.FromHtml("#e8e8ec");
                 PlaceholderFg = ColorTranslator.FromHtml("#7a7a88");
+                Accent = ColorTranslator.FromHtml("#0067c0");
             }
         }
         public static int TextPreviewLines = 10;
@@ -125,6 +136,7 @@ namespace HoverExplorer
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
                         case "DebugLog": DebugLog = Convert.ToBoolean(v); break;
                         case "HideTooltip": HideTooltip = Convert.ToBoolean(v); break;
+                        case "HideTrayIcon": HideTrayIcon = Convert.ToBoolean(v); break;
                         case "HotkeyEnabled": HotkeyEnabled = Convert.ToBoolean(v); break;
                         case "HotkeyModifiers": HotkeyModifiers = Convert.ToInt32(v); break;
                         case "HotkeyKey": HotkeyKey = Convert.ToInt32(v); break;
@@ -157,11 +169,13 @@ namespace HoverExplorer
                 data["PreviewFiles"] = PreviewFiles;
                 data["DebugLog"] = DebugLog;
                 data["HideTooltip"] = HideTooltip;
+                data["HideTrayIcon"] = HideTrayIcon;
                 data["HotkeyEnabled"] = HotkeyEnabled;
                 data["HotkeyModifiers"] = HotkeyModifiers;
                 data["HotkeyKey"] = HotkeyKey;
                 data["Language"] = Language;
                 data["Theme"] = Theme;
+                data["HoverDelay"] = HoverDelay;
                 var jss2 = new JavaScriptSerializer();
                 File.WriteAllText(p, jss2.Serialize(data));
             }

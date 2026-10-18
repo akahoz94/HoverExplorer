@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace HoverExplorer
@@ -70,10 +70,12 @@ namespace HoverExplorer
             {"theme", new[]{"主题","Theme","テーマ","테마","Thème","Тема","Tema"}},
             {"theme_dark", new[]{"深色","Dark","ダーク","다크","Sombre","Тёмная","Oscuro"}},
             {"theme_light", new[]{"浅色","Light","ライト","라이트","Clair","Светлая","Claro"}},
-            {"donate", new[]{"意思意思vx:jtugqivi","意思意思vx:jtugqivi","意思意思vx:jtugqivi","意思意思vx:jtugqivi","意思意思vx:jtugqivi","意思意思vx:jtugqivi","意思意思vx:jtugqivi"}},
+            {"donate", new[]{"vx:jtugqivi","vx:jtugqivi","vx:jtugqivi","vx:jtugqivi","vx:jtugqivi","vx:jtugqivi","vx:jtugqivi"}},
             {"donated", new[]{"已复制微信号 jtugqivi","Copied WeChat: jtugqivi","WeChatコピー: jtugqivi","WeChat 복사: jtugqivi","WeChat copié: jtugqivi","WeChat скопирован: jtugqivi","WeChat copiado: jtugqivi"}},
             {"debug_log", new[]{"调试日志","Debug log","デバッグログ","디버그 로그","Journal debug","Журнал отладки","Registro dep."}},
             {"hide_tooltip", new[]{"关闭系统提示","Hide system tooltip","システムヒントを閉じる","시스템 툴팁 숨기기","Masquer infobulle système","Скрыть подсказки","Ocultar tooltip sistema"}},
+            {"autostart", new[]{"开机自启","Run at startup","スタートアップに登録","시작 시 실행","Lancement au démarrage","Автозапуск","Iniciar con Windows"}},
+            {"hide_tray", new[]{"隐藏托盘图标","Hide tray icon","トレイアイコンを隠す","트레이 아이콘 숨기기","Masquer l'icône","Скрыть значок","Ocultar icono"}},
             {"settings", new[]{"设置","Settings","設定","설정","Paramètres","Настройки","Ajustes"}},
             {"settings_hotkey", new[]{"快捷键设置","Hotkey settings","ホットキー設定","단축키 설정","Raccourci clavier","Настройка гор. клавиши","Config. atajo"}},
             {"hotkey_enabled", new[]{"启用快捷键","Enable hotkey","ホットキー有効","단축키 활성화","Activer raccourci","Включить гор. клавишу","Activar atajo"}},
@@ -92,6 +94,8 @@ namespace HoverExplorer
             {"hover_enabled", new[]{"悬停已启用","Hover enabled","ホバー有効","호버 활성화","Survol activé","Наведение включено","Hover activado"}},
             {"hover_disabled", new[]{"悬停已禁用","Hover disabled","ホバー無効","호버 비활성화","Survol désactivé","Наведение отключено","Hover desactivado"}},
             {"hotkey_desc", new[]{"快捷键功能：启用/禁用悬停","Hotkey action: toggle hover","ホットキー機能：ホバー切替","단축키 기능: 호버 전환","Raccourci : basculer le survol","Гор. клавиша: вкл/выкл наведение","Atajo: alternar hover"}},
+            {"hover_delay", new[]{"悬停触发延时(秒)","Hover delay (sec)","ホバー遅延(秒)","호버 지연(초)","Délai de survol (s)","Задержка наведения (с)","Retraso de hover (s)"}},
+            {"hover_delay_desc", new[]{"鼠标悬停多久后弹出预览","Delay before preview appears","プレビューが表示されるまでの時間","미리보기가 표시되기까지의 시간","Délai avant l'aperçu","Время до появления предпросмотра","Tiempo antes de la vista previa"}},
         };
 
         public static string T(string key)

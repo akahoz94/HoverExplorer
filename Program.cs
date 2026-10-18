@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -26,8 +26,39 @@ namespace HoverExplorer
         private static int _subCloseLevel;
         private static System.Windows.Forms.Timer _timer;
         private static NotifyIcon _notifyIcon;
+        internal static ContextMenuStrip TrayMenu;
         private static HotkeyWindow _hotkey;
         private static bool _hoverEnabled = true;
+        private static bool _settingsOpen; // 设置窗口打开期间挂起面板自动关闭（面板可能是对话框属主）
+
+        // 开机自启：写 HKCU Run 键，无需安装
+        private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string RunValueName = "HoverExplorer";
+        private static bool IsAutoStart()
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
+                {
+                    var v = k == null ? null : k.GetValue(RunValueName) as string;
+                    return !string.IsNullOrEmpty(v);
+                }
+            }
+            catch { return false; }
+        }
+        private static void SetAutoStart(bool enable)
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    if (k == null) return;
+                    if (enable) k.SetValue(RunValueName, "\"" + Application.ExecutablePath + "\"");
+                    else k.DeleteValue(RunValueName, false);
+                }
+            }
+            catch { }
+        }
 
         public static void Log(string msg) { Trace.WriteLine(msg); }
 
@@ -104,7 +135,7 @@ namespace HoverExplorer
             _notifyIcon = new NotifyIcon
             {
                 Icon = CreateTrayIcon(),
-                Visible = true,
+                Visible = !Config.HideTrayIcon,
                 Text = "HoverExplorer",
             };
             var trayMenu = new ContextMenuStrip();
@@ -136,6 +167,21 @@ namespace HoverExplorer
             tooltipItem.Checked = Config.HideTooltip;
             tooltipItem.CheckedChanged += (s, e) => { Config.HideTooltip = tooltipItem.Checked; Config.Save(); };
             trayMenu.Items.Add(tooltipItem);
+            var autostartItem = new ToolStripMenuItem(I18n.T("autostart"));
+            autostartItem.CheckOnClick = true;
+            autostartItem.Checked = IsAutoStart();
+            autostartItem.CheckedChanged += (s, e) => SetAutoStart(autostartItem.Checked);
+            trayMenu.Items.Add(autostartItem);
+            var hideTrayItem = new ToolStripMenuItem(I18n.T("hide_tray"));
+            hideTrayItem.CheckOnClick = true;
+            hideTrayItem.Checked = Config.HideTrayIcon;
+            hideTrayItem.CheckedChanged += (s, e) =>
+            {
+                Config.HideTrayIcon = hideTrayItem.Checked;
+                Config.Save();
+                _notifyIcon.Visible = !Config.HideTrayIcon;
+            };
+            trayMenu.Items.Add(hideTrayItem);
             trayMenu.Items.Add(new ToolStripSeparator());
             var exitItem = new ToolStripMenuItem(I18n.T("exit"));
 
@@ -155,29 +201,30 @@ namespace HoverExplorer
             themeItem.DropDownItems.Add(themeDark);
             themeItem.DropDownItems.Add(themeLight);
 
-            var donateItem = new ToolStripMenuItem(I18n.T("donate"), null, (EventHandler)((s, e) =>
-            {
-                try { Clipboard.SetText("jtugqivi"); MessageBox.Show(I18n.T("donated"), I18n.T("donate"), MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
-            }));
-
             var settingsItem = new ToolStripMenuItem(I18n.T("settings"), null, (EventHandler)((s, e) =>
             {
-                using (var form = new SettingsForm())
+                _settingsOpen = true;
+                try
                 {
-                    if (form.ShowDialog() == DialogResult.OK)
+                    using (var form = new SettingsForm())
                     {
-                        Config.HotkeyEnabled = form.HotkeyEnabled;
-                        Config.HotkeyModifiers = form.HotkeyModifiers;
-                        Config.HotkeyKey = form.HotkeyKey;
-                        Config.Save();
-                        bool ok = _hotkey.ReRegister();
-                        if (!ok && Config.HotkeyEnabled)
-                            MessageBox.Show(I18n.T("hotkey_reg_fail"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        else
-                            MessageBox.Show(I18n.T("hotkey_saved"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        refreshExitText();
+                        if (form.ShowDialog() == DialogResult.OK)
+                        {
+                            Config.HotkeyEnabled = form.HotkeyEnabled;
+                            Config.HotkeyModifiers = form.HotkeyModifiers;
+                            Config.HotkeyKey = form.HotkeyKey;
+                            Config.HoverDelay = form.HoverDelaySetting;
+                            Config.Save();
+                            bool ok = _hotkey.ReRegister();
+                            if (!ok && Config.HotkeyEnabled)
+                                MessageBox.Show(I18n.T("hotkey_reg_fail"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            else
+                                MessageBox.Show(I18n.T("hotkey_saved"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            refreshExitText();
+                        }
                     }
                 }
+                finally { _settingsOpen = false; }
             }));
 
             var langItem = new ToolStripMenuItem(I18n.T("language"));
@@ -198,12 +245,13 @@ namespace HoverExplorer
                     previewItem.Text = I18n.T("file_preview");
                     debugItem.Text = I18n.T("debug_log");
                     tooltipItem.Text = I18n.T("hide_tooltip");
+                    autostartItem.Text = I18n.T("autostart");
+                    hideTrayItem.Text = I18n.T("hide_tray");
 
                     langItem.Text = I18n.T("language");
                     themeItem.Text = I18n.T("theme");
                     themeDark.Text = I18n.T("theme_dark");
                     themeLight.Text = I18n.T("theme_light");
-                    donateItem.Text = I18n.T("donate");
                     settingsItem.Text = I18n.T("settings");
                     refreshExitText();
                 };
@@ -211,12 +259,13 @@ namespace HoverExplorer
             }
             trayMenu.Items.Add(langItem);
             trayMenu.Items.Add(themeItem);
-            trayMenu.Items.Add(donateItem);
-
 
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add(exitItem);
+            TrayMenu = trayMenu;
+            // 选项菜单关闭后解除所有面板的菜单打开标记（避免面板被悬停丢失逻辑关闭后标记残留）
+            trayMenu.Closed += (s, e) => { foreach (var p in _panels) p.MenuOpen = false; };
             _notifyIcon.ContextMenuStrip = trayMenu;
 
             _hotkey = new HotkeyWindow();
@@ -272,13 +321,28 @@ namespace HoverExplorer
             NativeMethods.GetCursorPos(out pt);
             int mx = pt.X, my = pt.Y;
 
+            if (Control.MouseButtons == MouseButtons.Left)
+            {
+                bool inExtPv = PopupForm.FilePreviewContainsPoint(mx, my);
+                bool inPanelPv = _panels.Any(p => p.PreviewContainsPoint(mx, my));
+                if (!inExtPv && !inPanelPv)
+                {
+                    PopupForm.CancelFilePreview();
+                    foreach (var p in _panels) p.ClosePreviewIfAny();
+                }
+                PopupForm.EnsureExtPreviewTopmost();
+                return;
+            }
+
             // 预览显示期间每 Tick 维持 TOPMOST（不激活），防止被前台窗口盖住
             PopupForm.EnsureExtPreviewTopmost();
+            // 面板同理：偶发弹出后被资源管理器窗口压住，每 Tick 重新置顶
+            foreach (var p in _panels) p.EnsureTopmost();
 
             bool inPanel = _panels.Any(p => p.ContainsPoint(mx, my));
             bool inPreview = _panels.Any(p => p.PreviewContainsPoint(mx, my));
             bool inExtPreview = PopupForm.FilePreviewContainsPoint(mx, my);
-            if (inPanel || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
+            if (inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
             {
                 if (inPreview || inExtPreview) Program.DebugLog("[tick] mouse in preview, skip mx=" + mx + ",my=" + my + " inPanel=" + inPanel + " inPreview=" + inPreview + " inExtPreview=" + inExtPreview + " panels=" + _panels.Count);
                 _closeStart = DateTime.MinValue;
@@ -300,7 +364,7 @@ namespace HoverExplorer
 
             string hoverFolder = (hoverPath != null && hoverIsDir) ? hoverPath : null;
             // 无面板时悬停文件（图片/文本）直接预览，受"文件预览"开关控制
-            string hoverFile = (hoverPath != null && !hoverIsDir && _panels.Count == 0) ? hoverPath : null;
+            string hoverFile = (hoverPath != null && !hoverIsDir && _panels.All(p => p.Pinned)) ? hoverPath : null;
             if (hoverPath != null && Config.HideTooltip) HideTooltips();
             if (hoverPath != _lastHoverPath)
             {
@@ -345,18 +409,20 @@ namespace HoverExplorer
 
             if ((DateTime.UtcNow - _hoverStart).TotalSeconds >= Config.HoverDelay)
             {
-                if (_panels.Count == 0 || _panels[0].CurrentPath != hoverFolder)
+                var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+                if (nonPinned.Count == 0 || nonPinned[0].CurrentPath != hoverFolder)
                 {
                     DebugLog("[panel] opening " + hoverFolder);
-                    CloseAll();
-                    var p = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
-                    if (p.ShowPanel(hoverFolder, mx + Config.PopupOffset, my + Config.PopupOffset))
+                    foreach (var p in nonPinned) p.ClosePanel();
+                    _panels.RemoveAll(p => !p.Pinned);
+                    var p2 = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
+                    if (p2.ShowPanel(hoverFolder, mx + Config.PopupOffset, my + Config.PopupOffset))
                     {
                         ShowHighlight(hoverRect);
-                        _panels.Add(p);
-                        p.Show();
-                        p.FocusSearch();
-                        DebugLog("[panel] OPENED at " + p.Left + "," + p.Top + " size " + p.Width + "x" + p.Height);
+                        _panels.Add(p2);
+                        p2.Show();
+                        p2.FocusSearch();
+                        DebugLog("[panel] OPENED at " + p2.Left + "," + p2.Top + " size " + p2.Width + "x" + p2.Height);
                     }
                 }
             }
@@ -437,10 +503,11 @@ namespace HoverExplorer
         private static void CloseAfter(int level)
         {
             int before = _panels.Count;
-            while (_panels.Count > level + 1)
+            for (int i = _panels.Count - 1; i > level; i--)
             {
-                var p = _panels[_panels.Count - 1];
-                _panels.RemoveAt(_panels.Count - 1);
+                var p = _panels[i];
+                if (p.Pinned) continue;
+                _panels.RemoveAt(i);
                 p.ClosePanel();
             }
             if (before != _panels.Count) DebugLog("[cascade] CloseAfter level=" + level + " 面板数 " + before + " -> " + _panels.Count);
@@ -449,11 +516,14 @@ namespace HoverExplorer
 
         private static void CloseAll()
         {
-            DebugLog("[cascade] CloseAll 关闭全部面板 count=" + _panels.Count);
+            var toClose = _panels.Where(p => !p.Pinned).ToList();
+            var toKeep = _panels.Where(p => p.Pinned).ToList();
+            DebugLog("[cascade] CloseAll 关闭面板 close=" + toClose.Count + " keep(pinned)=" + toKeep.Count);
             HideHighlight();
             if (_subCloseTimer != null) { _subCloseTimer.Stop(); _subCloseTimer.Dispose(); _subCloseTimer = null; }
-            foreach (var p in _panels) p.ClosePanel();
+            foreach (var p in toClose) p.ClosePanel();
             _panels.Clear();
+            _panels.AddRange(toKeep);
         }
 
         private static HighlightOverlay _highlight;

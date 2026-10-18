@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -50,7 +50,19 @@ namespace HoverExplorer
 
         private static IntPtr _cachedHeaderHwnd;
         private static double _cachedHeaderLeft = double.NaN, _cachedHeaderRight;
+        private static double _cachedHeaderTop, _cachedHeaderBottom;
         private static DateTime _headerCacheTime;
+
+        // 条目是否处于详细信息视图：存在可见的"名称"表头，且紧贴条目上方并水平重叠
+        // （图标视图下窗口里也可能存在其他同名"名称"元素，但不会位于条目正上方）
+        private static bool IsDetailsView(IntPtr explorerHwnd, System.Windows.Rect itemRect)
+        {
+            if (!HasNameHeader(explorerHwnd)) return false;
+            if (explorerHwnd != _cachedHeaderHwnd || double.IsNaN(_cachedHeaderLeft)) return false;
+            if (_cachedHeaderBottom > itemRect.Y + 1) return false;   // 表头必须位于条目上方
+            if (_cachedHeaderRight <= itemRect.X || _cachedHeaderLeft >= itemRect.Right) return false; // 水平需重叠
+            return true;
+        }
 
         // 检测是否存在列头"名称"——有列头才是详细信息视图；图标/平铺视图无列头
         private static bool HasNameHeader(IntPtr explorerHwnd)
@@ -70,11 +82,14 @@ namespace HoverExplorer
                 {
                     try
                     {
+                        // 图标视图下表头元素仍存在但不可见（IsOffscreen），不能算作详细信息视图
+                        if (headers[i].Current.IsOffscreen) continue;
                         var hr = headers[i].Current.BoundingRectangle;
                         if (hr.Width > 10 && hr.Height > 0)
                         {
                             _cachedHeaderHwnd = explorerHwnd;
                             _cachedHeaderLeft = hr.X; _cachedHeaderRight = hr.Right;
+                            _cachedHeaderTop = hr.Y; _cachedHeaderBottom = hr.Bottom;
                             _headerCacheTime = DateTime.UtcNow;
                             return true;
                         }
@@ -140,6 +155,7 @@ namespace HoverExplorer
                             var h = headers[i];
                             try
                             {
+                                if (h.Current.IsOffscreen) continue;
                                 var hr = h.Current.BoundingRectangle;
                                 if (hr.Width <= 10 || hr.Height <= 0) continue;
                                 if (hr.Top < bestTop) { bestTop = hr.Top; best = h; }
@@ -155,6 +171,7 @@ namespace HoverExplorer
                                 var h = headers[i];
                                 try
                                 {
+                                    if (h.Current.IsOffscreen) continue;
                                     var hr = h.Current.BoundingRectangle;
                                     if (hr.Width <= 10 || hr.Height <= 0) continue;
                                     if (hr.Top < bestTop) { bestTop = hr.Top; best = h; }
@@ -312,8 +329,19 @@ namespace HoverExplorer
             }
             catch { }
 
-            // 触发区域限定为名称区域（图标 + 名称），悬停在其他列不触发
-            if (mx < nameLeft || mx > nameRight || my < nameTop || my > nameTop + nameHeight)
+            // 触发区域：详细信息视图限定名称列（避免悬停其他列误触发）；
+            // 图标/平铺视图（无列头）整个图标区域均可触发
+            bool detailsView = IsDetailsView(explorerHwnd, full);
+            if (!detailsView)
+            {
+                // 图标视图的 UIA/裁剪矩形宽度可能只有名称宽；图标格近似方形且高度已含图标，
+                // 以高度为准水平居中扩为整个图标区域
+                double cx = (full.X + full.Right) / 2;
+                double w = Math.Max(full.Width, full.Height);
+                nameLeft = cx - w / 2; nameRight = cx + w / 2;
+                nameTop = full.Y; nameHeight = full.Height;
+            }
+            if (detailsView && (mx < nameLeft || mx > nameRight || my < nameTop || my > nameTop + nameHeight))
             {
                 LogDetect("rejected-region", string.Format("mouse={0},{1} nameArea=({2:F0},{3:F0})-({4:F0},{5:F0}) row=({6:F0},{7:F0})-({8:F0},{9:F0})",
                     mx, my, nameLeft, nameTop, nameRight, nameTop + nameHeight, full.X, full.Y, full.Right, full.Bottom));
@@ -321,6 +349,8 @@ namespace HoverExplorer
             }
 
             rect = new System.Drawing.Rectangle((int)nameLeft, (int)nameTop, (int)(nameRight - nameLeft), (int)nameHeight);
+            LogDetect("rect", string.Format("details={0} full=({1:F0},{2:F0})-({3:F0},{4:F0}) final=({5},{6})-({7},{8})",
+                detailsView, full.X, full.Y, full.Right, full.Bottom, rect.Left, rect.Top, rect.Right, rect.Bottom));
 
             string dirPath = GetExplorerPath(explorerHwnd, name);
             if (dirPath == null) { LogDetect("no-path", "name=" + name); return null; }

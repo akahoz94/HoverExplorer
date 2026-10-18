@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -17,10 +17,11 @@ namespace HoverExplorer
 {
     internal class PreviewResult
     {
-        public enum KindEnum { Image, Text }
+        public enum KindEnum { Image, Text, Media, SvgHtml }
         public KindEnum Kind;
         public Image Image;
         public bool IsGif;
+        public bool IsVideo;
         public int DisplayW;
         public int DisplayH;
         public string Text;
@@ -42,13 +43,19 @@ namespace HoverExplorer
                 || Config.ExeExts.Contains(ext)
                 || Config.IcoExts.Contains(ext)
                 || Config.LnkExts.Contains(ext)
-                || Config.EpubExts.Contains(ext);
+                || Config.EpubExts.Contains(ext)
+                || Config.VideoExts.Contains(ext)
+                || Config.SvgExts.Contains(ext)
+                || Config.AudioExts.Contains(ext);
         }
 
         public static PreviewResult Generate(string full)
         {
             string ext = Path.GetExtension(full).ToLowerInvariant();
             if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext)) return GenImage(full);
+            if (Config.VideoExts.Contains(ext)) return GenVideo(full);
+            if (Config.SvgExts.Contains(ext)) return GenSvg(full);
+            if (Config.AudioExts.Contains(ext)) return GenAudio(full);
             if (Config.FontExts.Contains(ext)) return GenFont(full);
             if (Config.OfficeExts.Contains(ext)) return GenOffice(full, ext);
             if (Config.ZipExts.Contains(ext)) return GenZip(full);
@@ -102,6 +109,40 @@ namespace HoverExplorer
             }
             img.Dispose();
             return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = bmp };
+        }
+
+        // ===== 视频/音频：WPF MediaElement 播放器（零部署，Media Foundation 解码）=====
+        private static PreviewResult GenVideo(string full)
+        {
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Media, IsVideo = true, DisplayW = 320, DisplayH = 240 };
+        }
+
+        // SVG：IE 引擎渲染图形 + 下方显示源码（深色模式图形垫浅色底）
+        private static PreviewResult GenSvg(string full)
+        {
+            return new PreviewResult { Kind = PreviewResult.KindEnum.SvgHtml, Text = full };
+        }
+
+        private static PreviewResult ThumbResult(Image img)
+        {
+            if (img == null) return null;
+            double ratio = Math.Min((double)Config.PreviewMax / img.Width, (double)Config.PreviewMax / img.Height);
+            if (ratio > 1) ratio = 1;
+            if (ratio >= 1) return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = img };
+            int w = (int)(img.Width * ratio), h = (int)(img.Height * ratio);
+            var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.DrawImage(img, 0, 0, w, h);
+            }
+            img.Dispose();
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = bmp };
+        }
+
+        private static PreviewResult GenAudio(string full)
+        {
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Media, IsVideo = false, DisplayW = 300, DisplayH = 90 };
         }
 
         // ===== 字体样张 =====

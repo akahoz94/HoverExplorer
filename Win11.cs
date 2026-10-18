@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 namespace HoverExplorer
 {
@@ -11,21 +12,49 @@ namespace HoverExplorer
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
 
+        [DllImport("user32.dll", EntryPoint = "SetClassLong")]
+        static extern uint SetClassLong32(IntPtr hWnd, int nIndex, uint dwNewLong);
+        [DllImport("user32.dll", EntryPoint = "SetClassLongPtr")]
+        static extern IntPtr SetClassLong64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+        const int GCL_STYLE = -26;
+        const int CS_DROPSHADOW = 0x00020000;
+
+        static IntPtr SetClassLongPtrSafe(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
+        {
+            return IntPtr.Size == 8 ? SetClassLong64(hWnd, nIndex, dwNewLong) : (IntPtr)SetClassLong32(hWnd, nIndex, (uint)dwNewLong.ToInt32());
+        }
+
         static void Set(IntPtr h, int attr, int v) { DwmSetWindowAttribute(h, attr, ref v, 4); }
         static int Build { get { return Environment.OSVersion.Version.Build; } }
 
-        // DWMWA_USE_IMMERSIVE_DARK_MODE=20, DWMWA_WINDOW_CORNER_PREFERENCE=33(2=Round), DWMWA_BORDER_COLOR=34
         public static void Apply(IntPtr handle, bool dark, Color? borderColor = null)
         {
             if (handle == IntPtr.Zero) return;
+            SetClassLongPtrSafe(handle, GCL_STYLE, (IntPtr)CS_DROPSHADOW);
             Set(handle, 20, dark ? 1 : 0);
             if (Build < 22000) return;
-            Set(handle, 33, 2);
-            if (borderColor.HasValue)
+            Set(handle, 33, 1);
+        }
+
+        // 控件滚动条深色化：uxtheme 非公开入口 AllowDarkModeForWindow(#133) + DarkMode_Explorer 主题
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
+
+        [DllImport("uxtheme.dll", EntryPoint = "#133")]
+        static extern bool AllowDarkModeForWindow(IntPtr hWnd, bool allow);
+
+        public static void ApplyScrollTheme(Control c, bool dark)
+        {
+            if (c == null) return;
+            try
             {
-                var c = borderColor.Value;
-                Set(handle, 34, c.R | (c.G << 8) | (c.B << 16));
+                var h = c.Handle;
+                if (h == IntPtr.Zero) return;
+                AllowDarkModeForWindow(h, dark);
+                SetWindowTheme(h, dark ? "DarkMode_Explorer" : "Explorer", null);
             }
+            catch { }
         }
     }
 }

@@ -726,32 +726,23 @@ namespace HoverExplorer
             BackColor = Config.BG;
             DoubleBuffered = true;
             AllowDrop = true;
-            DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
+            DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
+            DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
             DragDrop += (s, e) =>
             {
                 var files = (string[])e.Data.GetData(DataFormats.FileDrop);
                 if (files == null || string.IsNullOrEmpty(_path)) return;
+                bool move = e.Effect == DragDropEffects.Move;
+                Program.DebugLog("[drop-form] effect=" + e.Effect + " keyState=" + e.KeyState + " move=" + move + " dstDir=" + _path + " files=" + string.Join(";", files));
                 foreach (var f in files)
                 {
-                    try
+                    if (!string.IsNullOrEmpty(f) && (File.Exists(f) || Directory.Exists(f)))
                     {
-                        var dest = Path.Combine(_path, Path.GetFileName(f));
-                        if (Directory.Exists(f)) CopyDirectory(f, dest);
-                        else File.Copy(f, dest, false);
+                        if (move) DoMove(f, _path);
+                        else DoCopy(f, _path);
                     }
-                    catch { }
                 }
-                ShowPanel(_path, Left, Top);
             };
-        }
-
-        private static void CopyDirectory(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            foreach (var f in Directory.GetFiles(src))
-                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), false);
-            foreach (var d in Directory.GetDirectories(src))
-                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
         }
 
         private static readonly Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
@@ -1045,11 +1036,19 @@ namespace HoverExplorer
                 row.MouseDown += (s, e) => OnRowDown(row, e);
                 row.MouseMove += (s, e) => OnRowMove(row, e);
                 row.MouseUp += (s, e) => OnRowUp(row, e);
+                row.GiveFeedback += (s, e) =>
+                {
+                    // 拖拽指针反馈：Shift=移动(纯箭头)，默认=复制(箭头+加号)
+                    e.UseDefaultCursors = false;
+                    bool move = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
+                    Cursor.Current = move ? DropMoveCursor : DropCopyCursor;
+                };
                 row.MouseClick += (s, e) => { if (e.Button == MouseButtons.Right) PopupMenu(row, e); };
                 if (isDir)
                 {
                     row.AllowDrop = true;
-                    row.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = DragDropEffects.Move; row.BackColor = Config.DropHighlight; } };
+                    row.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; row.BackColor = Config.DropHighlight; } };
+                    row.DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
                     row.DragLeave += (s, e) => ApplySel(row);
                     row.DragDrop += (s, e) => { OnDrop(row, e); };
                 }
@@ -1677,12 +1676,74 @@ namespace HoverExplorer
             string dstDir = row.Full;
             if (!Directory.Exists(dstDir)) return;
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
+            bool move = e.Effect == DragDropEffects.Move;
+            Program.DebugLog("[drop-row] effect=" + e.Effect + " keyState=" + e.KeyState + " move=" + move + " dstDir=" + dstDir + " files=" + (files == null ? "null" : string.Join(";", files)));
             foreach (var src in files)
             {
                 if (!string.IsNullOrEmpty(src) && (File.Exists(src) || Directory.Exists(src)) && src != dstDir)
-                    DoMove(src, dstDir);
+                {
+                    if (move) DoMove(src, dstDir);
+                    else DoCopy(src, dstDir);
+                }
             }
             ApplySel(row);
+        }
+
+        private void DoCopy(string src, string dstDir)
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    string dst = UniqueDest(src, dstDir);
+                    if (dst == src) { Program.DebugLog("[copy-skip] same path " + src); return; }
+                    if (Directory.Exists(src)) CopyDir(src, dst);
+                    else File.Copy(src, dst);
+                    Program.DebugLog("[copy-ok] " + src + " -> " + dst);
+                    BeginInvoke((MethodInvoker)delegate() { OnMoveDone(); Program.RefreshPanelsShowing(null, dstDir); });
+                }
+                catch (Exception ex) { Program.DebugLog("[copy-fail] " + src + " -> " + dstDir + " : " + ex.Message); }
+            });
+        }
+
+        private static void CopyDir(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src)) File.Copy(f, Path.Combine(dst, Path.GetFileName(f)));
+            foreach (var d in Directory.GetDirectories(src)) CopyDir(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        // 拖拽反馈光标：复制=箭头+加号，移动=纯箭头
+        private static Cursor _dropCopyCursor, _dropMoveCursor;
+        private static Cursor DropCopyCursor { get { if (_dropCopyCursor == null) _dropCopyCursor = MakeDropCursor(true); return _dropCopyCursor; } }
+        private static Cursor DropMoveCursor { get { if (_dropMoveCursor == null) _dropMoveCursor = MakeDropCursor(false); return _dropMoveCursor; } }
+
+        private static Cursor MakeDropCursor(bool copy)
+        {
+            var bmp = new Bitmap(32, 32);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                Cursors.Arrow.Draw(g, new Rectangle(0, 0, 32, 32));
+                if (copy)
+                {
+                    g.FillRectangle(Brushes.White, 19, 19, 12, 12);
+                    using (var pen = new Pen(Color.Black, 2))
+                    {
+                        g.DrawRectangle(pen, 19, 19, 11, 11);
+                        g.DrawLine(pen, 25, 22, 25, 28);
+                        g.DrawLine(pen, 22, 25, 28, 25);
+                    }
+                }
+            }
+            IntPtr mask = bmp.GetHbitmap();
+            IntPtr color = bmp.GetHbitmap();
+            var ii = new NativeMethods.ICONINFO { fIcon = false, xHotspot = 0, yHotspot = 0, hbmMask = mask, hbmColor = color };
+            IntPtr hCur = NativeMethods.CreateIconIndirect(ref ii);
+            NativeMethods.DeleteObject(mask);
+            NativeMethods.DeleteObject(color);
+            bmp.Dispose();
+            return new Cursor(hCur);
         }
 
         private void DoMove(string src, string dstDir)
@@ -1692,12 +1753,13 @@ namespace HoverExplorer
                 try
                 {
                     string dst = UniqueDest(src, dstDir);
-                    if (dst == src) return;
+                    if (dst == src) { Program.DebugLog("[move-skip] same path " + src); return; }
                     if (Directory.Exists(src)) Directory.Move(src, dst);
                     else File.Move(src, dst);
-                    BeginInvoke((MethodInvoker)delegate() { OnMoveDone(); });
+                    Program.DebugLog("[move-ok] " + src + " -> " + dst);
+                    BeginInvoke((MethodInvoker)delegate() { OnMoveDone(); Program.RefreshPanelsShowing(Path.GetDirectoryName(src), dstDir); });
                 }
-                catch (Exception ex) { Program.Log("[移动失败] " + ex.Message); }
+                catch (Exception ex) { Program.DebugLog("[move-fail] " + src + " -> " + dstDir + " : " + ex.Message); }
             });
         }
 
@@ -1729,6 +1791,12 @@ namespace HoverExplorer
             Win11.Apply(Handle, Config.Theme != "light", Config.Border);
             int x = Location.X, y = Location.Y;
             ShowPanel(_path, x, y);
+        }
+
+        // 当前面板是否正在显示指定目录
+        public bool ShowingPath(string dir)
+        {
+            return dir != null && _path != null && string.Equals(_path, dir, StringComparison.OrdinalIgnoreCase);
         }
 
         private static ToolStripMenuItem MI(string text, Action handler)

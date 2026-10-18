@@ -18,6 +18,16 @@ namespace HoverExplorer
         private static IntPtr _listview = IntPtr.Zero;
         private static RemoteReader _reader;
         private static readonly List<PopupForm> _panels = new List<PopupForm>();
+
+        // 刷新正在显示指定目录的所有面板（跨面板移动/复制后同步源和目标列表）
+        public static void RefreshPanelsShowing(string dir1, string dir2)
+        {
+            foreach (var p in _panels)
+            {
+                if (p.IsDisposed) continue;
+                if (p.ShowingPath(dir1) || (dir2 != null && p.ShowingPath(dir2))) p.RefreshPanel();
+            }
+        }
         private static string _hoverFolder;
         private static string _extHoverFile;
         private static string _lastHoverPath;

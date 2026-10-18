@@ -12,6 +12,8 @@ namespace HoverExplorer
 {
     internal static class Program
     {
+        public const string Version = "1.0.0.6";
+
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
         private static RemoteReader _reader;

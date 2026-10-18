@@ -24,7 +24,7 @@ $f = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"; $wpf = "$f\WPF"
 
 ## 2. 版本号
 
-代码内无版本字段，版本即 git tag（如 `v1.0.0.4`）。用户给定则用给定值；否则在最新 tag 上递增末位（`git tag -l | sort -V`）。
+版本号存两处，必须同步：`Program.cs` 顶部 `Program.Version` 常量（设置面板右下角显示）和 git tag（如 `v1.0.0.6`）。用户给定则用给定值；否则在最新 tag 上递增末位（`git tag -l | sort -V`），先改 `Program.Version` 再编译。
 
 ## 3. 检查 README
 

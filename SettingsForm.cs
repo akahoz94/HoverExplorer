@@ -17,6 +17,7 @@ namespace HoverExplorer
         private Button _okBtn;
         private Button _cancelBtn;
         private Label _hintLbl;
+        private Label _verLbl;
         private NumericUpDown _hoverDelayBox;
 
         private int _modifiers;
@@ -210,6 +211,17 @@ namespace HoverExplorer
             donateLbl.Click += copyWx;
             Controls.Add(donateLbl);
 
+            // 版本号：窗口右下角，弱化显示
+            _verLbl = new Label
+            {
+                Text = "v" + Program.Version,
+                AutoSize = true,
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8)
+            };
+            _verLbl.Location = new Point(ClientSize.Width - _verLbl.PreferredWidth - 12, ClientSize.Height - _verLbl.PreferredHeight - 10);
+            Controls.Add(_verLbl);
+
             AcceptButton = _okBtn;
             CancelButton = _cancelBtn;
 
@@ -295,6 +307,7 @@ namespace HoverExplorer
             _keyBox.BorderStyle = BorderStyle.FixedSingle;
             _currentLbl.ForeColor = Config.FgDir;
             _hintLbl.ForeColor = Config.PlaceholderFg;
+            if (_verLbl != null) _verLbl.ForeColor = Config.PlaceholderFg;
         }
     }
 }

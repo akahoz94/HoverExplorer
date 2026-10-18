@@ -1,4 +1,6 @@
 # HoverExplorer
+<img width="648" height="456" alt="compressO-PixPin_2026-10-19_05-18-43" src="https://github.com/user-attachments/assets/bae6220f-490d-4f2f-9d55-786155a2e030" />
+
 
 鼠标悬停即可浏览文件夹内容与预览文件，无需点击打开。
 

@@ -10,7 +10,8 @@ namespace HoverExplorer
     {
         private readonly string _path;
         private Label _closeBtn;
-        private Point _dragBefore;
+        private Point _dragStart, _formStart;
+        private bool _moved;
 
         public PinCardForm(string path, int x, int y)
         {
@@ -104,35 +105,49 @@ namespace HoverExplorer
             _closeBtn.Click += (s, e) => Program.Unpin(_path);
             Controls.Add(_closeBtn);
 
-            MouseEventHandler drag = (s, e) =>
+            // 手动拖动+点击合一：MouseDown 记录起点并 Capture，MouseMove 移动，MouseUp 判断移动则拖动/未移则执行
+            // 不能用 SendMessage(0xA1) 拖动——它在 MouseDown 时吃掉后续 Click 事件，致按钮点击无效
+            MouseEventHandler down = (s, e) =>
             {
-                if (e.Button != MouseButtons.Left) return;
-                _dragBefore = Location;
-                NativeMethods.ReleaseCapture();
-                NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
+                if (e.Button == MouseButtons.Left) { _dragStart = Cursor.Position; _formStart = Location; _moved = false; Capture = true; }
             };
             MouseEventHandler cardMouse = (s, e) =>
             {
                 if (e.Button == MouseButtons.Middle) Program.Unpin(_path);
                 else if (e.Button == MouseButtons.Right) ShellContextMenu.Show(_path, Handle, () => Program.Unpin(_path));
             };
+            MouseDown += down; MouseDown += cardMouse;
+            foreach (Control c in new Control[] { tile, iconLbl, nameLbl, subLbl })
+            {
+                c.MouseDown += down;
+                c.MouseDown += cardMouse;
+            }
+            runBtn.MouseDown += cardMouse;
+            runBtn.Click += (s, e) => Run();
+            MouseMove += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                if (!_moved)
+                {
+                    var d = Cursor.Position;
+                    if (Math.Abs(d.X - _dragStart.X) > 6 || Math.Abs(d.Y - _dragStart.Y) > 6) _moved = true;
+                }
+                if (_moved)
+                {
+                    var d = Cursor.Position;
+                    Location = new Point(_formStart.X + d.X - _dragStart.X, _formStart.Y + d.Y - _dragStart.Y);
+                }
+            };
             MouseUp += (s, e) =>
             {
-                if (Location != _dragBefore) Program.UpdatePinPos(_path, Left, Top);
+                if (e.Button == MouseButtons.Left)
+                {
+                    Capture = false;
+                    if (_moved) Program.UpdatePinPos(_path, Left, Top);
+
+                    _moved = false;
+                }
             };
-            foreach (Control c in new Control[] { tile, iconLbl, nameLbl, subLbl, runBtn })
-            {
-                c.MouseDown += drag;
-                c.MouseDown += cardMouse;
-                c.MouseUp += (s, e) => { if (Location != _dragBefore) Program.UpdatePinPos(_path, Left, Top); };
-            }
-            tile.Click += (s, e) => Run();
-            iconLbl.Click += (s, e) => Run();
-            nameLbl.Click += (s, e) => Run();
-            subLbl.Click += (s, e) => Run();
-            runBtn.Click += (s, e) => Run();
-            Click += (s, e) => Run();
-            MouseDown += cardMouse;
 
             MouseEnter += (s, e) => { _closeBtn.Visible = true; _closeBtn.BringToFront(); };
             MouseLeave += (s, e) => { if (!ClientRectangle.Contains(PointToClient(Cursor.Position))) _closeBtn.Visible = false; };

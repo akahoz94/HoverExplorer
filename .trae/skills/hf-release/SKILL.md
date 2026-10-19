@@ -53,3 +53,4 @@ gh release create v<版本> HoverExplorer.exe --repo dlsdgj/HoverExplorer --titl
 ## 完成后
 
 向用户报告 release 链接：`https://github.com/dlsdgj/HoverExplorer/releases/tag/v<版本>`。
+在桌面创建程序压缩文件，名称带版本号。

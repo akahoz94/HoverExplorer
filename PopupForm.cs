@@ -147,7 +147,7 @@ namespace HoverExplorer
                     var w = g.MeasureString(line, tb.Font);
                     if (w.Width > maxW) maxW = (int)w.Width;
                 }
-                ClientSize = new Size(Math.Min(maxW + 20, 480), Math.Min(initH, 320));
+                ClientSize = new Size(Math.Max(Math.Min(maxW + 20, 480), 240), Math.Min(initH, 320));
             }
 
         }
@@ -269,7 +269,7 @@ namespace HoverExplorer
                 Image = CopyIcon(),
                 Cursor = Cursors.Hand,
             };
-            _copyBtn.Click += (s, e) => CopyClick();
+            _copyBtn.MouseEnter += (s, e) => ShowCopyMenu();
             _toolbar.Controls.Add(_copyBtn);
 
             _saveBtn = new Label
@@ -614,6 +614,23 @@ namespace HoverExplorer
                 }
             }
             return bmp;
+        }
+
+        private void ShowCopyMenu()
+        {
+            if (string.IsNullOrEmpty(FilePath) || Program.ShellMenuOpen) return;
+            var m = new ContextMenuStrip { BackColor = Config.BG, ForeColor = Config.FG, Font = new Font(Config.FontName, Config.FontSize) };
+            m.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
+            var rtb = _content as RichTextBox;
+            if (rtb != null && rtb.SelectionLength > 0)
+                m.Items.Add(new ToolStripMenuItem(I18n.T("copy_selected"), null, (EventHandler)((s, e) => { try { Clipboard.SetText(rtb.SelectedText); ShowToast(I18n.T("copied")); } catch { } })));
+            else if (rtb != null)
+                m.Items.Add(new ToolStripMenuItem(I18n.T("copy_all"), null, (EventHandler)((s, e) => { try { Clipboard.SetText(rtb.Text); ShowToast(I18n.T("copied")); } catch { } })));
+            m.Items.Add(new ToolStripMenuItem(I18n.T("copy_file"), null, (EventHandler)((s, e) => { try { var f = new System.Collections.Specialized.StringCollection(); f.Add(FilePath); Clipboard.SetFileDropList(f); ShowToast(I18n.T("copied")); } catch { } })));
+            m.Items.Add(new ToolStripMenuItem(I18n.T("copy_path"), null, (EventHandler)((s, e) => { try { Clipboard.SetText(FilePath); ShowToast(I18n.T("copied")); } catch { } })));
+            Program.ShellMenuOpen = true;
+            m.Closed += (s, ev) => Program.ShellMenuOpen = false;
+            m.Show(_copyBtn.PointToScreen(new Point(0, _copyBtn.Height + 2)));
         }
 
         private void CopyClick()
@@ -1851,6 +1868,20 @@ namespace HoverExplorer
             return new ToolStripMenuItem(text, null, (EventHandler)((s, e) => handler()));
         }
 
+        private static void EditFile(string path)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(path) { Verb = "edit", UseShellExecute = true };
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch
+            {
+                try { System.Diagnostics.Process.Start("notepad.exe", "\"" + path + "\""); }
+                catch (Exception ex) { Program.DebugLog("[edit] fail " + path + " " + ex.Message); }
+            }
+        }
+
         private void PopupMenu(RowLabel row, MouseEventArgs e)
         {
             var m = new ContextMenuStrip { BackColor = Config.BG, ForeColor = Config.FG, Font = new Font(Config.FontName, Config.FontSize) };
@@ -1866,12 +1897,14 @@ namespace HoverExplorer
             {
                 ClearSel();
                 m.Items.Add(MI(I18n.T("open"), () => OpenPath(row.Full)));
+                m.Items.Add(MI(I18n.T("edit"), () => EditFile(row.Full)));
                 m.Items.Add(MI(I18n.T("new_window"), () => OpenInExplorer(row.Full)));
                 m.Items.Add(MI(I18n.T("rename"), () => Rename(row, e)));
                 m.Items.Add(MI(I18n.T("delete"), () => RecycleRows(new List<RowLabel> { row })));
                 m.Items.Add(new ToolStripSeparator());
                 m.Items.Add(MI(I18n.T("copy_path"), () => CopyText(row.Full)));
                 m.Items.Add(MI(I18n.T("copy_name"), () => CopyText(row.Name)));
+                m.Items.Add(MI(I18n.T("native_menu"), () => ShellContextMenu.Show(row.Full, Handle, null)));
             }
             _menuOpen = true;
             m.Closed += (s, ev) => _menuOpen = false;

@@ -12,7 +12,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.0.9";
+        public const string Version = "1.0.1";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -475,7 +475,7 @@ namespace HoverExplorer
             // 面板/预览显示期间也清理 Explorer tooltip：tooltips_class32 是 TOPMOST 且弹出更晚，
             // 会压在 TopMost band 顶部盖住列表/预览；鼠标进面板后下方不再检测文件，只有这里能清
             if (Config.HideTooltip && (inPanel || inPreview || inExtPreview)) HideTooltips();
-            if (!menuOpen && (inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview))
+            if (menuOpen || inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
             {
                 if (inPreview || inExtPreview) Program.DebugLog("[tick] mouse in preview, skip mx=" + mx + ",my=" + my + " inPanel=" + inPanel + " inPreview=" + inPreview + " inExtPreview=" + inExtPreview + " panels=" + _panels.Count);
                 _closeStart = DateTime.MinValue;

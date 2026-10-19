@@ -515,40 +515,46 @@ namespace HoverExplorer
 
         internal static Image PinIcon(bool pinned)
         {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("pin_" + pinned, () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                var c = Config.FG;
-                using (var p = new Pen(c, 1.4f))
-                using (var b = new SolidBrush(c))
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    g.DrawEllipse(p, 3, 2, 8, 8);
-                    if (pinned) g.FillEllipse(b, 3, 2, 8, 8);
-                    g.DrawLine(p, 7, 10, 7, 14);
-                    g.DrawLine(p, 6, 14, 8, 14);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    var c = Config.FG;
+                    using (var p = new Pen(c, 1.4f))
+                    using (var b = new SolidBrush(c))
+                    {
+                        g.DrawEllipse(p, 3, 2, 8, 8);
+                        if (pinned) g.FillEllipse(b, 3, 2, 8, 8);
+                        g.DrawLine(p, 7, 10, 7, 14);
+                        g.DrawLine(p, 6, 14, 8, 14);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
 
         internal static Image PinLaunchIcon(bool active)
         {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("pinlaunch_" + active, () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                var c = active ? Config.Accent : Config.FG;
-                using (var p = new Pen(c, 1.4f))
-                using (var b = new SolidBrush(c))
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    g.DrawRectangle(p, 3, 3, 10, 10);
-                    g.FillRectangle(b, 3, 3, 2, 10);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    var c = active ? Config.Accent : Config.FG;
+                    using (var p = new Pen(c, 1.4f))
+                    using (var b = new SolidBrush(c))
+                    {
+                        g.DrawRectangle(p, 3, 3, 10, 10);
+                        g.FillRectangle(b, 3, 3, 2, 10);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
 
         internal void RefreshPinLaunchIcon()
@@ -561,59 +567,68 @@ namespace HoverExplorer
 
         internal static Image TrashIcon()
         {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("trash", () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                using (var p = new Pen(Config.FG, 1.4f))
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    g.DrawLine(p, 2, 4, 14, 4);
-                    g.DrawLine(p, 4, 2, 12, 2);
-                    g.DrawLine(p, 4, 2, 4, 4);
-                    g.DrawLine(p, 12, 2, 12, 4);
-                    g.DrawLine(p, 3.5f, 4, 4.5f, 14);
-                    g.DrawLine(p, 12.5f, 4, 11.5f, 14);
-                    g.DrawLine(p, 4.5f, 14, 11.5f, 14);
-                    g.DrawLine(p, 7, 6, 7, 12);
-                    g.DrawLine(p, 10, 6, 10, 12);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    using (var p = new Pen(Config.FG, 1.4f))
+                    {
+                        g.DrawLine(p, 2, 4, 14, 4);
+                        g.DrawLine(p, 4, 2, 12, 2);
+                        g.DrawLine(p, 4, 2, 4, 4);
+                        g.DrawLine(p, 12, 2, 12, 4);
+                        g.DrawLine(p, 3.5f, 4, 4.5f, 14);
+                        g.DrawLine(p, 12.5f, 4, 11.5f, 14);
+                        g.DrawLine(p, 4.5f, 14, 11.5f, 14);
+                        g.DrawLine(p, 7, 6, 7, 12);
+                        g.DrawLine(p, 10, 6, 10, 12);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
 
         private static Image CopyIcon()
         {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("copy", () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                using (var p = new Pen(Config.FG, 1.4f))
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    g.DrawRectangle(p, 2, 2, 8, 10);
-                    g.DrawRectangle(p, 5, 4, 8, 10);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    using (var p = new Pen(Config.FG, 1.4f))
+                    {
+                        g.DrawRectangle(p, 2, 2, 8, 10);
+                        g.DrawRectangle(p, 5, 4, 8, 10);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
 
         private static Image SaveIcon()
         {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("save", () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                using (var p = new Pen(Config.FG, 1.4f))
-                using (var b = new SolidBrush(Config.FG))
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    g.DrawRectangle(p, 2, 2, 12, 12);
-                    g.FillRectangle(b, 4, 3, 8, 3);
-                    g.DrawRectangle(p, 5, 9, 6, 4);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    using (var p = new Pen(Config.FG, 1.4f))
+                    using (var b = new SolidBrush(Config.FG))
+                    {
+                        g.DrawRectangle(p, 2, 2, 12, 12);
+                        g.FillRectangle(b, 4, 3, 8, 3);
+                        g.DrawRectangle(p, 5, 9, 6, 4);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
 
         private void ShowCopyMenu()
@@ -804,6 +819,22 @@ namespace HoverExplorer
         }
 
         private static readonly Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
+
+        private static readonly Dictionary<string, Image> _uiIconCache = new Dictionary<string, Image>();
+        internal static Image UiIcon(string key, Func<Image> create)
+        {
+            string fullKey = key + "|" + Config.Theme;
+            Image img;
+            if (_uiIconCache.TryGetValue(fullKey, out img)) return img;
+            img = create();
+            _uiIconCache[fullKey] = img;
+            return img;
+        }
+        internal static void ClearUiIconCache()
+        {
+            foreach (var kv in _uiIconCache) { try { kv.Value.Dispose(); } catch { } }
+            _uiIconCache.Clear();
+        }
 
         // 子面板（level>0）不抢前台：避免叠加时 Show() 激活触发 DWM 重绘叠加区导致闪烁。
         // level 0 面板有搜索框，需要前台焦点才能输入，仍抢前台

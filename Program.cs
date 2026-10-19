@@ -12,7 +12,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.1";
+        public const string Version = "1.0.2";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -40,6 +40,7 @@ namespace HoverExplorer
         private static int _subCloseLevel;
         private static System.Windows.Forms.Timer _timer;
         private static NotifyIcon _notifyIcon;
+        private static IntPtr _trayHicon = IntPtr.Zero;
         internal static ContextMenuStrip TrayMenu;
         private static HotkeyWindow _hotkey;
         private static bool _hoverEnabled = true;
@@ -210,8 +211,8 @@ namespace HoverExplorer
             var themeDark = new ToolStripMenuItem(I18n.T("theme_dark")) { Checked = (Config.Theme == "dark") };
             var themeLight = new ToolStripMenuItem(I18n.T("theme_light")) { Checked = (Config.Theme == "light") };
             Action refreshThemeMenus = () => { themeDark.Checked = Config.Theme == "dark"; themeLight.Checked = Config.Theme == "light"; };
-            themeDark.Click += (s, e) => { Config.Theme = "dark"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); foreach (var p in _panels) p.RefreshPanel(); };
-            themeLight.Click += (s, e) => { Config.Theme = "light"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); foreach (var p in _panels) p.RefreshPanel(); };
+            themeDark.Click += (s, e) => { Config.Theme = "dark"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); };
+            themeLight.Click += (s, e) => { Config.Theme = "light"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); };
             themeItem.DropDownItems.Add(themeDark);
             themeItem.DropDownItems.Add(themeLight);
 
@@ -319,6 +320,7 @@ namespace HoverExplorer
             {
                 _timer.Stop();
                 if (_notifyIcon != null) { _notifyIcon.Visible = false; _notifyIcon.Dispose(); }
+                if (_trayHicon != IntPtr.Zero) { try { NativeMethods.DestroyIcon(_trayHicon); } catch { } _trayHicon = IntPtr.Zero; }
                 if (_hotkey != null) _hotkey.Unregister();
                 if (_reader != null) _reader.Dispose();
             };
@@ -411,8 +413,15 @@ namespace HoverExplorer
 
         private static DateTime _lastMenuLog;
         private static DateTime _lastMenuSeen;
+        private static DateTime _lastMenuCheck;
         private static bool IsSystemMenuOpen()
         {
+            var now = DateTime.UtcNow;
+            // 菜单打开后的 500ms 宽限期内直接返回，不 EnumWindows
+            if ((now - _lastMenuSeen).TotalMilliseconds < 500) return true;
+            // 节流：距上次未发现菜单的检测不足 200ms 则跳过 EnumWindows
+            if ((now - _lastMenuCheck).TotalMilliseconds < 200) return false;
+            _lastMenuCheck = now;
             bool found = false;
             NativeMethods.EnumWindows((h, l) =>
             {
@@ -425,14 +434,16 @@ namespace HoverExplorer
                 }
                 return true;
             }, IntPtr.Zero);
-            if (found) _lastMenuSeen = DateTime.UtcNow;
-            bool open = (DateTime.UtcNow - _lastMenuSeen).TotalMilliseconds < 500;
-            if (open && found && (DateTime.UtcNow - _lastMenuLog).TotalMilliseconds > 1000)
+            if (found)
             {
-                _lastMenuLog = DateTime.UtcNow;
-                DebugLog("[tick] system menu #32768 detected, skip");
+                _lastMenuSeen = now;
+                if ((now - _lastMenuLog).TotalMilliseconds > 1000)
+                {
+                    _lastMenuLog = now;
+                    DebugLog("[tick] system menu #32768 detected, skip");
+                }
             }
-            return open;
+            return found;
         }
 
         private static void TickImpl()
@@ -665,6 +676,17 @@ namespace HoverExplorer
             foreach (var p in toClose) p.ClosePanel();
             _panels.Clear();
             _panels.AddRange(toKeep);
+            MaybeTrimMemory();
+        }
+
+        private static DateTime _lastTrim;
+        private static void MaybeTrimMemory()
+        {
+            var now = DateTime.UtcNow;
+            if ((now - _lastTrim).TotalSeconds < 10) return;
+            _lastTrim = now;
+            GC.Collect(0, GCCollectionMode.Optimized, false);
+            try { NativeMethods.SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, -1, -1); } catch { }
         }
 
         private static HighlightOverlay _highlight;
@@ -761,6 +783,8 @@ namespace HoverExplorer
                 }
                 var hicon = bmp.GetHicon();
                 var icon = Icon.FromHandle(hicon);
+                bmp.Dispose();
+                _trayHicon = hicon;
                 return icon;
             }
             catch { return SystemIcons.Application; }

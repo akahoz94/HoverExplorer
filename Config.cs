@@ -39,7 +39,7 @@ namespace HoverExplorer
         public static int HoverDelayMs { get { return Math.Max(50, (int)(HoverDelay * 1000)); } }
         public static int SubHoverDelay = 150;
         public static double CloseDelay = 0.35;
-        public static int CheckInterval = 40;
+        public static int CheckInterval = 80;
         public static int PopupOffset = 16;
         public static int SubGap = 4;
         public static int MaxItems = 40;

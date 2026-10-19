@@ -32,8 +32,8 @@ namespace HoverExplorer
             try { var fi = new FileInfo(path); sub = Config.FmtSize(fi.Length); } catch { }
 
             Image iconImg = null;
-            try { var ic = Icon.ExtractAssociatedIcon(path); if (ic != null) iconImg = ic.ToBitmap(); } catch { }
-            if (iconImg != null) iconImg = new Bitmap(iconImg, 28, 28);
+            try { var ic = Icon.ExtractAssociatedIcon(path); if (ic != null) { iconImg = ic.ToBitmap(); ic.Dispose(); } } catch { }
+            if (iconImg != null) { var scaled = new Bitmap(iconImg, 28, 28); iconImg.Dispose(); iconImg = scaled; }
 
             var tile = new Panel
             {
@@ -187,19 +187,22 @@ namespace HoverExplorer
 
         private static Image RunIcon(bool active)
         {
-            var bmp = new Bitmap(14, 14);
-            using (var g = Graphics.FromImage(bmp))
+            return PopupForm.UiIcon("runcard_" + active, () =>
             {
-                g.Clear(Color.Transparent);
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                var c = active ? Color.White : Config.Accent;
-                using (var b = new SolidBrush(c))
+                var bmp = new Bitmap(14, 14);
+                using (var g = Graphics.FromImage(bmp))
                 {
-                    var pts = new PointF[] { new PointF(3, 2), new PointF(11, 7), new PointF(3, 12) };
-                    g.FillPolygon(b, pts);
+                    g.Clear(Color.Transparent);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    var c = active ? Color.White : Config.Accent;
+                    using (var b = new SolidBrush(c))
+                    {
+                        var pts = new PointF[] { new PointF(3, 2), new PointF(11, 7), new PointF(3, 12) };
+                        g.FillPolygon(b, pts);
+                    }
                 }
-            }
-            return bmp;
+                return bmp;
+            });
         }
     }
 }

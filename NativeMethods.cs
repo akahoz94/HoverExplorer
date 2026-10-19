@@ -282,6 +282,9 @@ namespace HoverExplorer
             return res;
         }
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, int dwMinimumWorkingSetSize, int dwMaximumWorkingSetSize);
+
         public static string GetClassOf(IntPtr hWnd)
         {
             var sb = new System.Text.StringBuilder(256);

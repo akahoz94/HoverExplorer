@@ -128,6 +128,7 @@ namespace HoverExplorer
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
+
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
 
@@ -174,6 +175,12 @@ namespace HoverExplorer
 
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+        public const uint GW_HWNDPREV = 3;
+        public const int GWL_EXSTYLE = -20;
+        public const long WS_EX_TOPMOST = 0x8;
 
         [DllImport("user32.dll")]
 
@@ -248,9 +255,11 @@ namespace HoverExplorer
         [DllImport("user32.dll")]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        public static extern int GetWindowLongW(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
         public static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
-        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
         public static extern IntPtr GetWindowLong64(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
         public static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);

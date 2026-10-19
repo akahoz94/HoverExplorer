@@ -96,6 +96,8 @@ namespace HoverExplorer
             {"hotkey_desc", new[]{"快捷键功能：启用/禁用悬停","Hotkey action: toggle hover","ホットキー機能：ホバー切替","단축키 기능: 호버 전환","Raccourci : basculer le survol","Гор. клавиша: вкл/выкл наведение","Atajo: alternar hover"}},
             {"hover_delay", new[]{"悬停触发延时(秒)","Hover delay (sec)","ホバー遅延(秒)","호버 지연(초)","Délai de survol (s)","Задержка наведения (с)","Retraso de hover (s)"}},
             {"hover_delay_desc", new[]{"鼠标悬停多久后弹出预览","Delay before preview appears","プレビューが表示されるまでの時間","미리보기가 표시되기까지의 시간","Délai avant l'aperçu","Время до появления предпросмотра","Tiempo antes de la vista previa"}},
+            {"pin_launch", new[]{"钉为启动卡片","Pin as launch card","ピン（起動カード）","핀 (실행 카드)","Épingler (carte lancement)","Закр. (карта запуска)","Fijar (tarjeta inicio)"}},
+            {"unpin", new[]{"取消固定","Unpin","解除","고정해제","Détacher","Открепить","Soltar"}},
         };
 
         public static string T(string key)

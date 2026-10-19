@@ -1,0 +1,29 @@
+﻿$ErrorActionPreference = "Continue"
+$src = "C:\Users\Administrator\Desktop\HoverFolder\cs"
+$out = "$src\HoverExplorer.exe"
+
+function Find-Gac($name) {
+    $hits = Get-ChildItem 'C:\Windows\Microsoft.NET\assembly' -Recurse -Filter $name -ErrorAction SilentlyContinue
+    $g64 = $hits | Where-Object { $_.FullName -like '*GAC_64*' } | Select-Object -First 1
+    if ($g64) { return $g64.FullName }
+    $gmsil = $hits | Where-Object { $_.FullName -like '*GAC_MSIL*' } | Select-Object -First 1
+    if ($gmsil) { return $gmsil.FullName }
+    return $null
+}
+
+$refs = @(
+    'System.Windows.Forms.dll','System.Drawing.dll','System.dll','System.Core.dll',
+    'System.IO.Compression.FileSystem.dll','System.IO.Compression.dll'
+)
+$gacRefs = @('UIAutomationClient','UIAutomationTypes','PresentationCore','PresentationFramework','WindowsBase','WindowsFormsIntegration','System.Xaml')
+foreach ($g in $gacRefs) {
+    $p = Find-Gac "$g.dll"
+    if (-not $p) { Write-Output "MISSING: $g"; exit 2 }
+    $refs += $p
+}
+
+if (Test-Path $out) { Set-ItemProperty $out -Name IsReadOnly -Value $false }
+$srcFiles = @('Config.cs','ExplorerSupport.cs','I18n.cs','MediaPreview.cs','NativeMethods.cs','PinCardForm.cs','PopupForm.cs','PreviewProvider.cs','Program.cs','RemoteReader.cs','SettingsForm.cs','ShellContextMenu.cs','Win11.cs') | ForEach-Object { "$src\$_" }
+
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:winexe /out:$out /resource:"$src\donate_qr.png",HoverExplorer.donate_qr.png ($refs | ForEach-Object { "/r:$_" }) $srcFiles
+if ($LASTEXITCODE -eq 0) { Write-Output "BUILD OK" } else { Write-Output "BUILD FAIL" }

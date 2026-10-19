@@ -75,6 +75,7 @@ namespace HoverExplorer
         private Control _content;
         private SizeGripCtl _grip;
         public string FilePath;
+        private Label _pinLaunchBtn;
 
         private bool _textDirty;
 
@@ -248,6 +249,17 @@ namespace HoverExplorer
             _pinBtn.Click += (s, e) => TogglePin();
             _toolbar.Controls.Add(_pinBtn);
 
+            _pinLaunchBtn = new Label
+            {
+                Size = new Size(20, 18),
+                AutoSize = false,
+                BackColor = Config.BG,
+                Image = PinLaunchIcon(false),
+                Cursor = Cursors.Hand,
+            };
+            _pinLaunchBtn.Click += (s, e) => { if (!string.IsNullOrEmpty(FilePath)) { Program.TogglePin(FilePath); RefreshPinLaunchIcon(); } };
+            _toolbar.Controls.Add(_pinLaunchBtn);
+
 
             _copyBtn = new Label
             {
@@ -397,7 +409,8 @@ namespace HoverExplorer
         {
             int btnY = 8;
             _pinBtn.Location = new Point(_toolbar.Width - _pinBtn.Width - 4, btnY);
-            _copyBtn.Location = new Point(_pinBtn.Left - _copyBtn.Width - 2, btnY);
+            _pinLaunchBtn.Location = new Point(_pinBtn.Left - _pinLaunchBtn.Width - 2, btnY);
+            _copyBtn.Location = new Point(_pinLaunchBtn.Left - _copyBtn.Width - 2, btnY);
             int anchor = _copyBtn.Left;
             if (_saveBtn.Visible)
             {
@@ -416,6 +429,7 @@ namespace HoverExplorer
             if (nameW < 0) nameW = 0;
             _nameLbl.Location = new Point(34, btnY + 1);
             _nameLbl.Size = new Size(nameW, 18);
+            RefreshPinLaunchIcon();
         }
 
         public void SetHeader(string name, string meta, string iconText, Color iconColor)
@@ -517,6 +531,32 @@ namespace HoverExplorer
                 }
             }
             return bmp;
+        }
+
+        internal static Image PinLaunchIcon(bool active)
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                var c = active ? Config.Accent : Config.FG;
+                using (var p = new Pen(c, 1.4f))
+                using (var b = new SolidBrush(c))
+                {
+                    g.DrawRectangle(p, 3, 3, 10, 10);
+                    g.FillRectangle(b, 3, 3, 2, 10);
+                }
+            }
+            return bmp;
+        }
+
+        internal void RefreshPinLaunchIcon()
+        {
+            if (_pinLaunchBtn == null) return;
+            bool active = !string.IsNullOrEmpty(FilePath) && Program.IsPinned(FilePath);
+            _pinLaunchBtn.Image = PinLaunchIcon(active);
+            _pinLaunchBtn.Invalidate();
         }
 
         internal static Image TrashIcon()
@@ -682,12 +722,13 @@ namespace HoverExplorer
         public static Action OnSortChange;
 
         private readonly int _level;
-        private readonly Action<int, string, int> _onOpenSub;
+        private readonly Action<PopupForm, int, string, int> _onOpenSub;
         private readonly Func<int, int, string> _dropResolver;
         private readonly Action<int> _onScheduleCloseAfter;
         private readonly List<RowLabel> _rows = new List<RowLabel>();
         private readonly Dictionary<string, BorderLabel> _sortBtns = new Dictionary<string, BorderLabel>();
         private TextBox _searchBox;
+        private FlowLayoutPanel _sortFlow;
         private Panel _listPanel;
         private string _path;
         private int _headH;
@@ -713,7 +754,7 @@ namespace HoverExplorer
 
         public bool Pinned { get { return _pinned; } }
 
-        public PopupForm(int level, Action<int, string, int> onOpenSub, Func<int, int, string> dropResolver, Action<int> onScheduleCloseAfter)
+        public PopupForm(int level, Action<PopupForm, int, string, int> onOpenSub, Func<int, int, string> dropResolver, Action<int> onScheduleCloseAfter)
         {
             _level = level;
             _onOpenSub = onOpenSub;
@@ -746,6 +787,10 @@ namespace HoverExplorer
         }
 
         private static readonly Dictionary<string, Image> _iconCache = new Dictionary<string, Image>();
+
+        // 子面板（level>0）不抢前台：避免叠加时 Show() 激活触发 DWM 重绘叠加区导致闪烁。
+        // level 0 面板有搜索框，需要前台焦点才能输入，仍抢前台
+        protected override bool ShowWithoutActivation { get { return _level > 0; } }
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -813,6 +858,7 @@ namespace HoverExplorer
             if (_level == 0)
             {
                 var sortFlow = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Location = new Point(6, curY), AutoSize = false, Height = 26, Width = _panelW - 12 };
+                _sortFlow = sortFlow;
                 foreach (var kv in Config.SortLabels)
                 {
                     var btn = new BorderLabel
@@ -969,6 +1015,7 @@ namespace HoverExplorer
                     if (c is Panel && c.BackColor == Config.Border) c.Width = _panelW - 12;
                 }
                 if (_searchBox != null) _searchBox.Width = _panelW - 14;
+                if (_sortFlow != null) _sortFlow.Width = _panelW - 12;
                 if (_pinBtn != null) { _pinBtn.Location = new Point(_panelW - 26, 7); _pinBtn.BringToFront(); }
             }
 
@@ -1278,7 +1325,7 @@ namespace HoverExplorer
             _hoverPath = path;
             _hoverRowY = rowScreenY;
             _hoverTimer = new Timer { Interval = Config.SubHoverDelay };
-            _hoverTimer.Tick += (s, e) => { _hoverTimer.Stop(); _hoverTimer.Dispose(); _hoverTimer = null; Program.DebugLog("[panel] 悬停计时触发 -> 请求打开子面板 level=" + _level + " path=" + _hoverPath); if (_hoverPath != null && _onOpenSub != null) _onOpenSub(_level, _hoverPath, _hoverRowY); };
+            _hoverTimer.Tick += (s, e) => { _hoverTimer.Stop(); _hoverTimer.Dispose(); _hoverTimer = null; Program.DebugLog("[panel] 悬停计时触发 -> 请求打开子面板 level=" + _level + " path=" + _hoverPath); if (_hoverPath != null && _onOpenSub != null) _onOpenSub(this, _level, _hoverPath, _hoverRowY); };
             _hoverTimer.Start();
         }
 
@@ -1450,12 +1497,12 @@ namespace HoverExplorer
             return _extPreviewForm != null && _extPreviewForm.ContainsPoint(x, y);
         }
 
-        // 预览显示期间保持 TOPMOST（不激活）：防止被前台窗口盖住
+        // 预览显示期间保持 TOPMOST（不激活）：防止被前台窗口盖住。
+        // 仅在被外部进程窗口压住时才提顶，避免与其他叠加窗口每 Tick 互相翻转 z 序（闪烁）
         public static void EnsureExtPreviewTopmost()
         {
             if (_extPreviewForm == null || !_extPreviewForm.IsHandleCreated || !_extPreviewForm.Visible) return;
-            NativeMethods.SetWindowPos(_extPreviewForm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+            EnsureWinTopmost(_extPreviewForm.Handle, "extpreview " + _extPreviewForm.FilePath);
         }
 
         public static void ScheduleExtPreviewClose(int mx, int my)
@@ -1905,6 +1952,7 @@ namespace HoverExplorer
         }
 
         public int RightEdge() { return Left + Width; }
+        public int Level { get { return _level; } }
         public int GeometryY() { return Top; }
         public int HeadHeight() { return _level == 0 ? _headH : 0; }
 
@@ -1936,16 +1984,49 @@ namespace HoverExplorer
             if (_pinBtn != null) _pinBtn.Image = PreviewForm.PinIcon(_pinned);
         }
 
-        // 面板显示期间维持 TOPMOST（不激活）：防止被资源管理器等前台窗口盖住
+        // 统一保顶：先恢复丢失的 WS_EX_TOPMOST（Show/Focus 激活会清），再按需提顶。
+        // 每 Tick 无条件 SetWindowPos(TOPMOST) 会让叠加窗口互相翻转 z 序致闪烁，故仅在必要时提。
+        // 面板、面板内预览、外部预览共用此方法，避免任一窗口 TopMost 丢失后陷入死锁
+        // （TopMost 丢了 → CoveredByOther 首个上方窗口非 TopMost → return false → 永不提顶 → 永被盖住）
+        private static DateTime _lastRestoreLog;
+        private static DateTime _lastRaiseLog;
+        public static void EnsureWinTopmost(IntPtr h, string tag)
+        {
+            if (h == IntPtr.Zero) return;
+            try
+            {
+                int ex = NativeMethods.GetWindowLongW(h, NativeMethods.GWL_EXSTYLE);
+                if ((ex & (int)NativeMethods.WS_EX_TOPMOST) == 0)
+                {
+                    NativeMethods.SetWindowPos(h, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                        NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+                    if ((DateTime.UtcNow - _lastRestoreLog).TotalMilliseconds > 500)
+                    {
+                        _lastRestoreLog = DateTime.UtcNow;
+                        Program.DebugLog("[z] restore " + tag);
+                    }
+                    return;
+                }
+            }
+            catch { }
+            if (Program.CoveredByOther(h))
+            {
+                NativeMethods.SetWindowPos(h, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+                if ((DateTime.UtcNow - _lastRaiseLog).TotalMilliseconds > 300)
+                {
+                    _lastRaiseLog = DateTime.UtcNow;
+                    Program.DebugLog("[z] raise " + tag);
+                }
+            }
+        }
+
         public void EnsureTopmost()
         {
             if (!IsHandleCreated || !Visible) return;
-            NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
-            // 面板内的预览窗是独立窗口，同样需要每 Tick 置顶
+            EnsureWinTopmost(Handle, "panel L" + _level + " " + _path);
             if (_previewForm != null && _previewForm.IsHandleCreated && _previewForm.Visible)
-                NativeMethods.SetWindowPos(_previewForm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                    NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+                EnsureWinTopmost(_previewForm.Handle, "preview " + _path);
         }
     }
 

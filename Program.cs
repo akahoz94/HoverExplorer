@@ -12,12 +12,14 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.0.7";
+        public const string Version = "1.0.0.9";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
         private static RemoteReader _reader;
         private static readonly List<PopupForm> _panels = new List<PopupForm>();
+        private static readonly List<PinCardForm> _pinCards = new List<PinCardForm>();
+        internal static bool ShellMenuOpen;
 
         // 刷新正在显示指定目录的所有面板（跨面板移动/复制后同步源和目标列表）
         public static void RefreshPanelsShowing(string dir1, string dir2)
@@ -304,6 +306,15 @@ namespace HoverExplorer
             _timer.Tick += (s, e) => Tick();
             _timer.Start();
 
+            foreach (var item in Config.PinnedItems)
+            {
+                if (!File.Exists(item.Path)) continue;
+                var card = new PinCardForm(item.Path, item.X, item.Y);
+                card.Tag = item.Path;
+                _pinCards.Add(card);
+                card.Show();
+            }
+
             Application.ApplicationExit += (s, e) =>
             {
                 _timer.Stop();
@@ -321,8 +332,112 @@ namespace HoverExplorer
             catch (Exception ex) { Log("[tick异常] " + ex.Message); }
         }
 
+        private static readonly uint _currentPid = (uint)Process.GetCurrentProcess().Id;
+
+        private static DateTime _lastCoverLog;
+        // h 是否被其他进程的 TopMost 窗口压住（从 TopMost band 顶到 h 之间存在外部窗口）。
+        // 本进程窗口之间的相对 z 序保持创建时的稳定顺序，不做每 Tick 翻转。
+        // 必须叠加几何检查：TopMost band 顶部常有有不叠加的外部窗口（任务栏、远处 tooltip），
+        // 不检查几何会误判为压住 → 每 Tick 提顶 → 叠加的本进程窗口互相翻转 z 序 → 闪烁
+        public static bool CoveredByOther(IntPtr h)
+        {
+            if (h == IntPtr.Zero) return false;
+            NativeMethods.RECT rcH;
+            if (!NativeMethods.GetWindowRect(h, out rcH)) return false;
+            try
+            {
+                IntPtr w = NativeMethods.GetWindow(h, NativeMethods.GW_HWNDPREV);
+                for (int i = 0; i < 32 && w != IntPtr.Zero; i++)
+                {
+                    if ((NativeMethods.GetWindowLongW(w, NativeMethods.GWL_EXSTYLE) & (int)NativeMethods.WS_EX_TOPMOST) == 0)
+                        return false;
+                    uint pid;
+                    NativeMethods.GetWindowThreadProcessId(w, out pid);
+                    if (pid != _currentPid && NativeMethods.IsWindowVisible(w))
+                    {
+                        NativeMethods.RECT rcW;
+                        if (NativeMethods.GetWindowRect(w, out rcW)
+                            && rcW.Left < rcH.Right && rcW.Right > rcH.Left
+                            && rcW.Top < rcH.Bottom && rcW.Bottom > rcH.Top)
+                        {
+                            if ((DateTime.UtcNow - _lastCoverLog).TotalMilliseconds > 500)
+                            {
+                                _lastCoverLog = DateTime.UtcNow;
+                                DebugLog("[z] covered by pid=" + pid + " rect=" + rcW.Left + "," + rcW.Top + "-" + rcW.Right + "," + rcW.Bottom + " my=" + rcH.Left + "," + rcH.Top + "-" + rcH.Right + "," + rcH.Bottom);
+                            }
+                            return true;
+                        }
+                    }
+                    w = NativeMethods.GetWindow(w, NativeMethods.GW_HWNDPREV);
+                }
+                return false;
+            }
+            catch (Exception ex) { DebugLog("[z] CoveredByOther ex: " + ex.Message); return false; }
+        }
+
+        public static bool IsPinned(string path) { return Config.PinnedItems.Exists(p => p.Path == path); }
+
+        public static void TogglePin(string path)
+        {
+            if (IsPinned(path)) { Unpin(path); return; }
+            int x = Cursor.Position.X + 20, y = Cursor.Position.Y + 20;
+            var card = new PinCardForm(path, x, y);
+            card.Tag = path;
+            Config.PinnedItems.Add(new PinnedItem { Path = path, X = x, Y = y });
+            Config.Save();
+            _pinCards.Add(card);
+            card.Show();
+            DebugLog("[pin] add " + path);
+        }
+
+        public static void Unpin(string path)
+        {
+            Config.PinnedItems.RemoveAll(p => p.Path == path);
+            Config.Save();
+            for (int i = _pinCards.Count - 1; i >= 0; i--)
+            {
+                var c = _pinCards[i];
+                if (c.IsDisposed) { _pinCards.RemoveAt(i); continue; }
+                if ((c.Tag as string) == path) { try { c.Close(); c.Dispose(); } catch { } _pinCards.RemoveAt(i); }
+            }
+            DebugLog("[pin] remove " + path);
+        }
+
+        public static void UpdatePinPos(string path, int x, int y)
+        {
+            var item = Config.PinnedItems.Find(p => p.Path == path);
+            if (item != null) { item.X = x; item.Y = y; Config.Save(); }
+        }
+
+        private static DateTime _lastMenuLog;
+        private static DateTime _lastMenuSeen;
+        private static bool IsSystemMenuOpen()
+        {
+            bool found = false;
+            NativeMethods.EnumWindows((h, l) =>
+            {
+                if (NativeMethods.IsWindowVisible(h))
+                {
+                    var sb = new System.Text.StringBuilder(64);
+                    NativeMethods.GetClassName(h, sb, 64);
+                    var cn = sb.ToString();
+                    if (cn == "#32768") { found = true; return false; }
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (found) _lastMenuSeen = DateTime.UtcNow;
+            bool open = (DateTime.UtcNow - _lastMenuSeen).TotalMilliseconds < 500;
+            if (open && found && (DateTime.UtcNow - _lastMenuLog).TotalMilliseconds > 1000)
+            {
+                _lastMenuLog = DateTime.UtcNow;
+                DebugLog("[tick] system menu #32768 detected, skip");
+            }
+            return open;
+        }
+
         private static void TickImpl()
         {
+            bool menuOpen = ShellMenuOpen || IsSystemMenuOpen();
             if (!_hoverEnabled)
             {
                 PopupForm.EnsureExtPreviewTopmost();
@@ -343,10 +458,13 @@ namespace HoverExplorer
                     foreach (var p in _panels) p.ClosePreviewIfAny();
                 }
                 PopupForm.EnsureExtPreviewTopmost();
+                // 左键按住期间同样保面板置顶，否则按住拖拽时被盖住的窗口无法自愈
+                foreach (var p in _panels) p.EnsureTopmost();
+                foreach (var c in _pinCards) { if (!c.IsDisposed) PopupForm.EnsureWinTopmost(c.Handle, "pincard"); }
                 return;
             }
 
-            // 预览显示期间每 Tick 维持 TOPMOST（不激活），防止被前台窗口盖住
+            // 预览显示期间维持 TOPMOST（不激活），防止被前台窗口盖住
             PopupForm.EnsureExtPreviewTopmost();
             // 面板同理：偶发弹出后被资源管理器窗口压住，每 Tick 重新置顶
             foreach (var p in _panels) p.EnsureTopmost();
@@ -354,7 +472,10 @@ namespace HoverExplorer
             bool inPanel = _panels.Any(p => p.ContainsPoint(mx, my));
             bool inPreview = _panels.Any(p => p.PreviewContainsPoint(mx, my));
             bool inExtPreview = PopupForm.FilePreviewContainsPoint(mx, my);
-            if (inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
+            // 面板/预览显示期间也清理 Explorer tooltip：tooltips_class32 是 TOPMOST 且弹出更晚，
+            // 会压在 TopMost band 顶部盖住列表/预览；鼠标进面板后下方不再检测文件，只有这里能清
+            if (Config.HideTooltip && (inPanel || inPreview || inExtPreview)) HideTooltips();
+            if (!menuOpen && (inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview))
             {
                 if (inPreview || inExtPreview) Program.DebugLog("[tick] mouse in preview, skip mx=" + mx + ",my=" + my + " inPanel=" + inPanel + " inPreview=" + inPreview + " inExtPreview=" + inExtPreview + " panels=" + _panels.Count);
                 _closeStart = DateTime.MinValue;
@@ -365,13 +486,16 @@ namespace HoverExplorer
             bool hoverIsDir = false;
             Rectangle hoverRect = Rectangle.Empty;
 
-            if (NativeMethods.PointOnDesktop(mx, my))
+            if (!menuOpen)
             {
-                hoverPath = DetectDesktopItem(mx, my, out hoverRect, out hoverIsDir);
-            }
-            else if (Config.ExplorerEnabled)
-            {
-                hoverPath = ExplorerSupport.DetectHoverItem(mx, my, out hoverRect, out hoverIsDir);
+                if (NativeMethods.PointOnDesktop(mx, my))
+                {
+                    hoverPath = DetectDesktopItem(mx, my, out hoverRect, out hoverIsDir);
+                }
+                else if (Config.ExplorerEnabled)
+                {
+                    hoverPath = ExplorerSupport.DetectHoverItem(mx, my, out hoverRect, out hoverIsDir);
+                }
             }
 
             string hoverFolder = (hoverPath != null && hoverIsDir) ? hoverPath : null;
@@ -489,20 +613,22 @@ namespace HoverExplorer
             return _reader;
         }
 
-        private static void OpenSub(int level, string path, int rowScreenY)
+        private static void OpenSub(PopupForm sender, int level, string path, int rowScreenY)
         {
             DebugLog("[cascade] OpenSub 子面板 level=" + (level + 1) + " path=" + path + " 当前面板数=" + _panels.Count);
             if (_subCloseTimer != null) { _subCloseTimer.Stop(); _subCloseTimer.Dispose(); _subCloseTimer = null; }
             CloseAfter(level);
-            if (_panels.Count == 0 || !_panels[level].IsHandleCreated) { DebugLog("[cascade] OpenSub 中止：父面板不存在 level=" + level); return; }
-            int x = _panels[level].RightEdge() + Config.SubGap;
+            // 定位基准是触发悬停的面板（sender）。不能用 _panels[level]：level 是级联层级
+            // 不是数组索引，pinned 面板占据索引 0 时 level 与索引错位
+            if (sender == null || sender.IsDisposed || !sender.IsHandleCreated) { DebugLog("[cascade] OpenSub 中止：触发面板不存在 level=" + level); return; }
+            int x = sender.RightEdge() + Config.SubGap;
             int y = rowScreenY;
             var form = new PopupForm(level + 1, OpenSub, DropResolver, ScheduleCloseAfter);
             if (form.ShowPanel(path, x, y))
             {
                 _panels.Add(form);
                 form.Show();
-                _panels[level].SetActiveDir(path);
+                sender.SetActiveDir(path);
                 DebugLog("[cascade] 子面板已显示 level=" + (level + 1) + " at " + form.Left + "," + form.Top + " 面板总数=" + _panels.Count);
             }
             else
@@ -514,16 +640,19 @@ namespace HoverExplorer
 
         private static void CloseAfter(int level)
         {
+            // 按面板的 Level 属性关闭，不用数组索引：pinned 面板占据索引 0 时
+            // 索引 > level 会把同层级的面板（如 pinned 面板后面新开的 level 0 列表）误当成深层级关掉
             int before = _panels.Count;
-            for (int i = _panels.Count - 1; i > level; i--)
+            for (int i = _panels.Count - 1; i >= 0; i--)
             {
                 var p = _panels[i];
-                if (p.Pinned) continue;
+                if (p.Pinned || p.Level <= level) continue;
                 _panels.RemoveAt(i);
                 p.ClosePanel();
             }
             if (before != _panels.Count) DebugLog("[cascade] CloseAfter level=" + level + " 面板数 " + before + " -> " + _panels.Count);
-            if (level >= 0 && level < _panels.Count) _panels[level].ClearActiveDir();
+            var parent = _panels.FirstOrDefault(p => p.Level == level && !p.IsDisposed);
+            if (parent != null) parent.ClearActiveDir();
         }
 
         private static void CloseAll()
@@ -562,9 +691,8 @@ namespace HoverExplorer
                 _subCloseTimer.Stop(); _subCloseTimer.Dispose(); _subCloseTimer = null;
                 NativeMethods.POINT pt;
                 NativeMethods.GetCursorPos(out pt);
-                bool inSub = false;
-                for (int i = _subCloseLevel + 1; i < _panels.Count; i++)
-                    if (_panels[i].ContainsPoint(pt.X, pt.Y)) { inSub = true; break; }
+                // 按 Level 属性判断层级，不用数组索引（pinned 面板会导致索引错位）
+                bool inSub = _panels.Any(p => p.Level > _subCloseLevel && p.ContainsPoint(pt.X, pt.Y));
                 if (!inSub) CloseAfter(_subCloseLevel);
             };
             _subCloseTimer.Start();

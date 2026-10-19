@@ -53,6 +53,7 @@ namespace HoverExplorer
         public static int HotkeyKey = 81; // Q
         public static string Language = "zh";
         public static string Theme = "dark";
+        public static List<PinnedItem> PinnedItems = new List<PinnedItem>();
         public static readonly string FontName = "Microsoft YaHei UI";
         public static readonly float FontSize = 10f;
         public static Color BG, FG, BgHover, BgDir, FgDir, DropHighlight, BgSel, Border, PlaceholderFg, Accent;
@@ -142,6 +143,14 @@ namespace HoverExplorer
                         case "HotkeyKey": HotkeyKey = Convert.ToInt32(v); break;
                         case "Language": Language = Convert.ToString(v); break;
                         case "Theme": Theme = Convert.ToString(v); break;
+                        case "PinnedItems":
+                            PinnedItems = new List<PinnedItem>();
+                            foreach (var item in (System.Collections.ArrayList)v)
+                            {
+                                var d = (Dictionary<string, object>)item;
+                                PinnedItems.Add(new PinnedItem { Path = Convert.ToString(d["Path"]), X = Convert.ToInt32(d["X"]), Y = Convert.ToInt32(d["Y"]) });
+                            }
+                            break;
                     }
                 }
                 I18n.Lang = Language;
@@ -176,6 +185,7 @@ namespace HoverExplorer
                 data["Language"] = Language;
                 data["Theme"] = Theme;
                 data["HoverDelay"] = HoverDelay;
+                data["PinnedItems"] = PinnedItems;
                 var jss2 = new JavaScriptSerializer();
                 File.WriteAllText(p, jss2.Serialize(data));
             }
@@ -194,5 +204,12 @@ namespace HoverExplorer
             }
             return string.Format("{0:0.0} GB", d);
         }
+    }
+
+    internal class PinnedItem
+    {
+        public string Path = "";
+        public int X;
+        public int Y;
     }
 }

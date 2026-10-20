@@ -48,9 +48,14 @@ namespace HoverExplorer
         // 记住的图片预览窗口尺寸（右下角手柄拖拽 / Ctrl+滚轮 调整后写入）；0 = 未设置，走自动尺寸
         public static int PreviewImgW = 0;
         public static int PreviewImgH = 0;
-        // 记住的媒体（视频/音频/SVG）预览窗口尺寸；0 = 未设置，走自动尺寸
+        // 记住的自定义面板预览窗口尺寸，视频/音频分开记（两者形态差异大，不能共用）
+        // PreviewMedia* 用于 SVG 面板；0 = 未设置，走自动尺寸
         public static int PreviewMediaW = 0;
         public static int PreviewMediaH = 0;
+        public static int PreviewVideoW = 0;
+        public static int PreviewVideoH = 0;
+        public static int PreviewAudioW = 0;
+        public static int PreviewAudioH = 0;
         // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
         public static double PreviewMaxRatio = 0.8;
         // 固定为"仅图标/名称触发"（已移除该开关）
@@ -152,6 +157,10 @@ namespace HoverExplorer
                         case "PreviewImgH": PreviewImgH = Convert.ToInt32(v); break;
                         case "PreviewMediaW": PreviewMediaW = Convert.ToInt32(v); break;
                         case "PreviewMediaH": PreviewMediaH = Convert.ToInt32(v); break;
+                        case "PreviewVideoW": PreviewVideoW = Convert.ToInt32(v); break;
+                        case "PreviewVideoH": PreviewVideoH = Convert.ToInt32(v); break;
+                        case "PreviewAudioW": PreviewAudioW = Convert.ToInt32(v); break;
+                        case "PreviewAudioH": PreviewAudioH = Convert.ToInt32(v); break;
                         case "PreviewMaxRatio": PreviewMaxRatio = Convert.ToDouble(v); break;
                         case "PanelWidth": PanelWidth = Convert.ToInt32(v); break;
                         case "PanelHeight": PanelHeight = Convert.ToInt32(v); break;
@@ -214,6 +223,10 @@ namespace HoverExplorer
                 data["PreviewImgH"] = PreviewImgH;
                 data["PreviewMediaW"] = PreviewMediaW;
                 data["PreviewMediaH"] = PreviewMediaH;
+                data["PreviewVideoW"] = PreviewVideoW;
+                data["PreviewVideoH"] = PreviewVideoH;
+                data["PreviewAudioW"] = PreviewAudioW;
+                data["PreviewAudioH"] = PreviewAudioH;
                 data["PreviewMaxRatio"] = PreviewMaxRatio;
                 data["PanelWidth"] = PanelWidth;
                 data["PanelHeight"] = PanelHeight;

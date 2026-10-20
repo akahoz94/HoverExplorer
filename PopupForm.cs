@@ -120,6 +120,28 @@ namespace HoverExplorer
         private Timer _unpinCloseTimer;
         private Timer _gripTimer;
         private Timer _sizeSaveTimer;
+        // 自定义内容类型：video / audio / svg（决定用哪套尺寸记忆）
+        private string _mediaKind = "svg";
+        internal string MediaKind { get { return _mediaKind; } }
+
+        // 标题就地改名
+        private TextBox _titleEdit;
+        private ToolTip _nameTip;
+        private bool _editing;
+        private int _savedW;
+        private int _toolbarH = 34;
+        // 区分预览窗的“挪位置”与“改尺寸”，避免挪动时把当前尺寸写进记忆
+        private Size _pvSizeMoveStart;
+        public bool Editing { get { return _editing; } }
+
+        // 所在目录改名后，同步预览窗里的文件路径
+        internal void RebaseFilePath(string oldPrefix, string newPrefix)
+        {
+            if (string.IsNullOrEmpty(FilePath)) return;
+            if (string.Equals(FilePath, oldPrefix, StringComparison.OrdinalIgnoreCase)) FilePath = newPrefix;
+            else if (FilePath.StartsWith(oldPrefix + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                FilePath = newPrefix + FilePath.Substring(oldPrefix.Length);
+        }
 
 
 
@@ -194,10 +216,12 @@ namespace HoverExplorer
         }
 
         // 自定义内容面板（视频/音频播放器 / SVG 浏览器）
-        public PreviewForm(Control content, int w, int h)
+        // kind: video / audio / svg —— 视频与音频使用各自独立的尺寸记忆
+        public PreviewForm(Control content, int w, int h, string kind)
             : this()
         {
             _content = content;
+            _mediaKind = string.IsNullOrEmpty(kind) ? "svg" : kind;
             // 关键：填充滚动面板，窗口调整大小时内容（视频画面）才会跟着变
             content.Dock = DockStyle.Fill;
             _scrollPanel.Controls.Add(content);
@@ -216,7 +240,7 @@ namespace HoverExplorer
             SetStyle(ControlStyles.ResizeRedraw, true);
 
             KeyPreview = true;
-            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { if (_editing) EndTitleEdit(false); else Close(); } };
             _wheelFilter = new WheelFilter(this);
             Application.AddMessageFilter(_wheelFilter);
             FormClosed += (s, e) =>
@@ -281,8 +305,19 @@ namespace HoverExplorer
                 ForeColor = Config.FG,
                 BackColor = Config.BG,
                 AutoEllipsis = true,
+                Cursor = Cursors.Hand,
             };
             _toolbar.Controls.Add(_nameLbl);
+            _nameTip = new ToolTip();
+            // 点击标题就地改名；用 MouseUp + 位移判断，避免拖动窗口后误触发
+            var nameDown = new Point(int.MinValue, int.MinValue);
+            _nameLbl.MouseDown += (s, e) => nameDown = e.Location;
+            _nameLbl.MouseUp += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                if (Math.Abs(e.Location.X - nameDown.X) > 3 || Math.Abs(e.Location.Y - nameDown.Y) > 3) return;
+                BeginTitleEdit();
+            };
 
             _metaLbl = new Label
             {
@@ -360,17 +395,27 @@ namespace HoverExplorer
                 ctl.MouseMove += (s, e) => { var c = (Control)s; var sp = c.PointToScreen(e.Location); UpdateResizeCursor(c, sp.X, sp.Y); };
                 ctl.MouseLeave += (s, e) => { ((Control)s).Cursor = null; };
             }
-            BindResize(_scrollPanel);
-            Resize += (s, e) =>
+            _titleEdit = new TextBox
             {
-                _grip.Location = new Point(ClientSize.Width - _grip.Width - 2, ClientSize.Height - _grip.Height - 2);
-                if (!IsHandleCreated) return;
-                _toolbar.Location = new Point(0, 0);
-                _toolbar.Size = new Size(ClientSize.Width, 34);
-                _scrollPanel.Location = new Point(0, 34);
-                _scrollPanel.Size = new Size(ClientSize.Width, ClientSize.Height - 34);
-                UpdateToolbarBtnPos();
+                Font = new Font(Config.FontName, 9f),
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                BorderStyle = BorderStyle.FixedSingle,
+                Visible = false,
+                Location = new Point(34, 7),
+                Size = new Size(120, 20),
             };
+            _titleEdit.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Return) { e.SuppressKeyPress = true; EndTitleEdit(true); }
+                else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; EndTitleEdit(false); }
+            };
+            // 点别处 = 提交（与资源管理器重命名一致）
+            _titleEdit.LostFocus += (s, e) => { if (_editing) EndTitleEdit(true); };
+            _toolbar.Controls.Add(_titleEdit);
+
+            BindResize(_scrollPanel);
+            Resize += (s, e) => ApplyLayout();
             UpdateToolbarBtnPos();
         }
 
@@ -424,12 +469,17 @@ namespace HoverExplorer
 
         protected override void WndProc(ref Message m)
         {
-            // WM_EXITSIZEMOVE：右下角手柄/边缘拖拽结束后记住尺寸（图片与媒体面板都记）
-            if (m.Msg == 0x232 && (_content is PictureBox || _content is Panel))
+            // WM_EXITSIZEMOVE：右下角手柄/边缘拖拽结束后记住尺寸（图片与媒体面板都记）。
+            // 拖动窗口位置也走这个消息，所以只有尺寸真的变了才记，否则挪一下窗口就把尺寸写死。
+            if (m.Msg == 0x231) _pvSizeMoveStart = ClientSize;
+            else if (m.Msg == 0x232)
             {
-                if (_content is PictureBox && ClientSize.Width >= 120) Config.PreviewMinWidth = ClientSize.Width;
-                RememberSize(ClientSize.Width, ClientSize.Height);
-                Program.DebugLog("[pv-size] resize-end " + ClientSize.Width + "x" + ClientSize.Height);
+                if (ClientSize != _pvSizeMoveStart && (_content is PictureBox || _content is Panel))
+                {
+                    if (_content is PictureBox && ClientSize.Width >= 120) Config.PreviewMinWidth = ClientSize.Width;
+                    RememberSize(ClientSize.Width, ClientSize.Height);
+                    Program.DebugLog("[pv-size] resize-end " + _mediaKind + " " + ClientSize.Width + "x" + ClientSize.Height);
+                }
             }
             base.WndProc(ref m);
         }
@@ -472,16 +522,33 @@ namespace HoverExplorer
             Program.DebugLog("[pv-size] auto " + w + "x" + h + " -> " + ClientSize.Width + "x" + ClientSize.Height + " max=" + maxW + "x" + maxH);
         }
 
+        // 取当前内容类型对应的记忆尺寸（视频/音频/SVG 各自独立）
+        private void GetRememberedMediaSize(out int w, out int h)
+        {
+            if (_mediaKind == "video") { w = Config.PreviewVideoW; h = Config.PreviewVideoH; }
+            else if (_mediaKind == "audio") { w = Config.PreviewAudioW; h = Config.PreviewAudioH; }
+            else { w = Config.PreviewMediaW; h = Config.PreviewMediaH; }
+        }
+
+        private void SetRememberedMediaSize(int w, int h)
+        {
+            if (_mediaKind == "video") { Config.PreviewVideoW = w; Config.PreviewVideoH = h; }
+            else if (_mediaKind == "audio") { Config.PreviewAudioW = w; Config.PreviewAudioH = h; }
+            else { Config.PreviewMediaW = w; Config.PreviewMediaH = h; }
+        }
+
         // 视频/音频/SVG 面板：优先套用记住的尺寸，否则按内容尺寸（含工具栏 34px）并限制占屏
         private void ApplyContentSize(int w, int h)
         {
             var wa = Screen.GetWorkingArea(this);
-            if (Config.PreviewMediaW > 0 && Config.PreviewMediaH > 0)
+            int mw, mh;
+            GetRememberedMediaSize(out mw, out mh);
+            if (mw > 0 && mh > 0)
             {
-                int rw = Math.Max(160, Math.Min(Config.PreviewMediaW, wa.Width - 20));
-                int rh = Math.Max(120, Math.Min(Config.PreviewMediaH, wa.Height - 20));
+                int rw = Math.Max(160, Math.Min(mw, wa.Width - 20));
+                int rh = Math.Max(120, Math.Min(mh, wa.Height - 20));
                 ClientSize = new Size(rw, rh);
-                Program.DebugLog("[pv-size] media-remembered " + rw + "x" + rh);
+                Program.DebugLog("[pv-size] media-remembered " + _mediaKind + " " + rw + "x" + rh);
                 return;
             }
             double ratio = Math.Min(1, Math.Max(0.3, Config.PreviewMaxRatio));
@@ -509,8 +576,7 @@ namespace HoverExplorer
             }
             else
             {
-                Config.PreviewMediaW = w;
-                Config.PreviewMediaH = h;
+                SetRememberedMediaSize(w, h);
             }
             if (_sizeSaveTimer == null)
             {
@@ -519,6 +585,33 @@ namespace HoverExplorer
             }
             _sizeSaveTimer.Stop();
             _sizeSaveTimer.Start();
+        }
+
+        // 视频解码完成后按真实宽高比调整窗口（避免固定 4:3 造成上下黑边）
+        // 用户已记住视频尺寸时不改动，尊重其手动调整
+        internal void FitVideoAspect(int vw, int vh)
+        {
+            if (vw <= 0 || vh <= 0) return;
+            int mw, mh;
+            GetRememberedMediaSize(out mw, out mh);
+            if (mw > 0 && mh > 0) return;
+            var wa = Screen.GetWorkingArea(this);
+            double ratio = Math.Min(1, Math.Max(0.3, Config.PreviewMaxRatio));
+            int maxW = Math.Max(240, (int)(wa.Width * ratio));
+            int maxH = Math.Max(180, (int)(wa.Height * ratio));
+            int w = Math.Max(200, Math.Min(ClientSize.Width, maxW));
+            int h = 64 + (int)Math.Round(w * (double)vh / vw);   // 工具栏 34 + 播放条 30 + 画面
+            if (h > maxH)
+            {
+                h = maxH;
+                w = Math.Max(200, (int)Math.Round((h - 64) * (double)vw / vh));
+            }
+            if (h > wa.Height - 20) h = wa.Height - 20;
+            ClientSize = new Size(w, Math.Max(120, h));
+            // 尺寸变化后别越出屏幕
+            if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height - 4);
+            if (Left + Width > wa.Right) Left = Math.Max(wa.Left, wa.Right - Width - 4);
+            Program.DebugLog("[pv-size] video-aspect " + vw + "x" + vh + " -> " + ClientSize.Width + "x" + ClientSize.Height);
         }
 
 
@@ -683,6 +776,90 @@ namespace HoverExplorer
             _metaLbl.Text = meta;
             _iconLbl.Text = iconText;
             _iconLbl.BackColor = iconColor;
+            // 标题常被右侧按钮挤成省略号，悬停给出完整路径
+            if (_nameTip != null) _nameTip.SetToolTip(_nameLbl, string.IsNullOrEmpty(FilePath) ? name : FilePath);
+        }
+
+        private void ApplyLayout()
+        {
+            _grip.Location = new Point(ClientSize.Width - _grip.Width - 2, ClientSize.Height - _grip.Height - 2);
+            if (!IsHandleCreated) return;
+            _toolbar.Location = new Point(0, 0);
+            _toolbar.Size = new Size(ClientSize.Width, _toolbarH);
+            _scrollPanel.Location = new Point(0, _toolbarH);
+            _scrollPanel.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - _toolbarH));
+            UpdateToolbarBtnPos();
+        }
+
+        // 标题就地改名：名称过长时先扩宽窗口，仍放不下就多行显示，保证输入内容看得全
+        private void BeginTitleEdit()
+        {
+            if (_editing || _titleEdit == null || string.IsNullOrEmpty(FilePath)) return;
+            string nm = Path.GetFileName(FilePath);
+            if (string.IsNullOrEmpty(nm)) return;
+            _editing = true;
+            _savedW = ClientSize.Width;
+            _titleEdit.Text = nm;
+            _titleEdit.Multiline = false;
+            _titleEdit.ScrollBars = ScrollBars.None;
+
+            int needW;
+            using (var g = _titleEdit.CreateGraphics())
+                needW = TextRenderer.MeasureText(g, nm, _titleEdit.Font).Width + 70;  // 左侧图标 + 右侧按钮区
+            var wa = Screen.GetWorkingArea(this);
+            int maxW = Math.Max(240, (int)(wa.Width * 0.8));
+            bool multiline = needW > maxW;
+            int w = Math.Min(Math.Max(ClientSize.Width, needW), maxW);
+
+            if (multiline)
+            {
+                // 超长名称：工具栏临时增高，编辑框在下方多行展开
+                _toolbarH = 34 + 46;
+                _titleEdit.Multiline = true;
+                _titleEdit.ScrollBars = ScrollBars.Vertical;
+                _titleEdit.Location = new Point(34, 30);
+                _titleEdit.Size = new Size(Math.Max(80, w - 44), 46);
+            }
+            else
+            {
+                _titleEdit.Location = new Point(34, 7);
+                _titleEdit.Size = new Size(Math.Max(80, w - 100), 20);
+            }
+            ClientSize = new Size(w, ClientSize.Height);
+            // 扩宽后别越出屏幕右边
+            if (Left + Width > wa.Right) Left = Math.Max(wa.Left, wa.Right - Width - 4);
+            _nameLbl.Visible = false;
+            ApplyLayout();
+            _titleEdit.Visible = true;
+            _titleEdit.BringToFront();
+            _titleEdit.Focus();
+            _titleEdit.SelectAll();
+            Program.DebugLog("[pv-rename] begin " + nm + " multiline=" + multiline + " w=" + w);
+        }
+
+        private void EndTitleEdit(bool commit)
+        {
+            if (!_editing) return;
+            _editing = false;
+            string nn = commit ? _titleEdit.Text.Trim() : "";
+            bool ok = false;
+            if (commit && !string.IsNullOrEmpty(nn) &&
+                !string.Equals(nn, Path.GetFileName(FilePath), StringComparison.OrdinalIgnoreCase))
+            {
+                string old = FilePath;
+                if (PopupForm.RenamePath(old, nn))
+                {
+                    FilePath = Path.Combine(Path.GetDirectoryName(old), nn);
+                    ok = true;
+                }
+            }
+            _titleEdit.Visible = false;
+            _nameLbl.Visible = true;
+            _toolbarH = 34;
+            ClientSize = new Size(_savedW, ClientSize.Height);
+            ApplyLayout();
+            if (ok) SetHeader(Path.GetFileName(FilePath), _metaLbl.Text, _iconLbl.Text, _iconLbl.BackColor);
+            Program.DebugLog("[pv-rename] end commit=" + commit + " ok=" + ok + " -> " + FilePath);
         }
 
 
@@ -1005,11 +1182,22 @@ namespace HoverExplorer
         private readonly List<RowLabel> _rows = new List<RowLabel>();
         private readonly Dictionary<string, BorderLabel> _sortBtns = new Dictionary<string, BorderLabel>();
         private TextBox _searchBox;
+        private Panel _searchBorder;
+        // 顶部名称行：当前文件夹名 + 编辑图标（点击就地改名）
+        private Panel _nameRow;
+        private Label _titleLbl;
+        private Label _editBtn;
+        private TextBox _nameEdit;
+        private ToolTip _titleTip;
         private FlowLayoutPanel _sortFlow;
         private Panel _listPanel;
         private string _path;
         private int _headH;
         private int _panelW = 260;
+        // 固定时记下自身尺寸：后续刷新沿用，避免条目少时被内容宽度或全局默认值改写
+        private int _pinnedW, _pinnedH;
+        // 进入移动/调整大小时的尺寸，用于区分“只是挪了位置”和“真的改了尺寸”
+        private Size _sizeMoveStart;
 
         private Timer _hoverTimer;
         private string _hoverPath;
@@ -1052,8 +1240,9 @@ namespace HoverExplorer
             {
                 if (e.KeyCode == Keys.Escape)
                 {
-                    if (_searchBox != null && !string.IsNullOrEmpty(_searchBox.Text) && _searchBox.Text != I18n.T("search"))
-                    { _searchBox.Text = ""; FilterRows(""); }
+                    // 正在就地改名 → 取消改名；搜索展开中 → 先收起搜索；否则关闭面板
+                    if (_nameEdit != null && _nameEdit.Visible) EndTitleRename(false);
+                    else if (_searchBorder != null && _searchBorder.Visible) ToggleSearch();
                     else Close();
                 }
             };
@@ -1094,9 +1283,9 @@ namespace HoverExplorer
             _uiIconCache.Clear();
         }
 
-        // 子面板（level>0）不抢前台：避免叠加时 Show() 激活触发 DWM 重绘叠加区导致闪烁。
-        // level 0 面板有搜索框，需要前台焦点才能输入，仍抢前台
-        protected override bool ShowWithoutActivation { get { return _level > 0; } }
+        // 一律不抢前台：面板只是悬停展示，抢前台会打断资源管理器的输入/重命名。
+        // 搜索框需要输入时由用户点击激活（点击属于真实输入，允许切换前台）
+        protected override bool ShowWithoutActivation { get { return true; } }
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -1112,11 +1301,22 @@ namespace HoverExplorer
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == 0x232)
+            // 拖动面板用的是 WM_NCLBUTTONDOWN+HTCAPTION，它同样会发 WM_EXITSIZEMOVE。
+            // 因此必须区分“挪位置”和“改尺寸”：否则挪一下只有一个文件的小面板，
+            // 它的高度就被记成全局默认的 PanelHeight，之后文件多的列表也被压成这么高。
+            if (m.Msg == 0x231) _sizeMoveStart = ClientSize;
+            else if (m.Msg == 0x232)
             {
-                Config.PanelWidth = ClientSize.Width;
-                Config.PanelHeight = ClientSize.Height;
-                Config.Save();
+                if (ClientSize != _sizeMoveStart)
+                {
+                    Config.PanelWidth = ClientSize.Width;
+                    Config.PanelHeight = ClientSize.Height;
+                    // 固定面板手动改过尺寸后，后续刷新沿用新尺寸
+                    if (_pinned) { _pinnedW = ClientSize.Width; _pinnedH = ClientSize.Height; }
+                    Config.Save();
+                    Program.DebugLog("[panel-size] resize-end " + ClientSize.Width + "x" + ClientSize.Height);
+                }
+                else Program.DebugLog("[panel-size] move-end, size unchanged -> keep defaults " + Config.PanelWidth + "x" + Config.PanelHeight);
             }
             base.WndProc(ref m);
         }
@@ -1245,7 +1445,71 @@ namespace HoverExplorer
                 _pinBtn.Click += (s, e) => TogglePinPopup();
                 Controls.Add(_pinBtn);
 
-                var searchBorder = new Panel { BackColor = Config.Border, Location = new Point(6, curY), Size = new Size(_panelW - 12, 22) };
+                // 名称行：当前文件夹名（过长省略，悬停 tooltip 显示完整路径）+ 编辑图标（点击就地改名）
+                _nameRow = new Panel { BackColor = Config.BG, Location = new Point(6, curY), Size = new Size(_panelW - 12, 22) };
+                _titleLbl = new Label
+                {
+                    Text = ShowName(path),
+                    Font = new Font(Config.FontName, Config.FontSize, FontStyle.Bold),
+                    ForeColor = Config.FG,
+                    BackColor = Config.BG,
+                    AutoEllipsis = true,
+                    UseCompatibleTextRendering = true,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Cursor = Cursors.Hand,
+                    Location = new Point(0, 2),
+                    Size = new Size(Math.Max(40, _panelW - 12 - 24), 18),
+                };
+                var titleDown = new Point(int.MinValue, int.MinValue);
+                _titleLbl.MouseDown += (s, e) => titleDown = e.Location;
+                // 用 MouseUp 而非 Click：拖动面板后不应误触发改名
+                _titleLbl.MouseUp += (s, e) =>
+                {
+                    if (e.Button != MouseButtons.Left) return;
+                    if (Math.Abs(e.Location.X - titleDown.X) > 3 || Math.Abs(e.Location.Y - titleDown.Y) > 3) return;
+                    BeginTitleRename();
+                };
+                if (_titleTip != null) { _titleTip.Dispose(); _titleTip = null; }
+                _titleTip = new ToolTip();
+                _titleTip.SetToolTip(_titleLbl, path);
+                _editBtn = new Label
+                {
+                    Text = "✎",
+                    Font = new Font(Config.FontName, Config.FontSize),
+                    ForeColor = Config.PlaceholderFg,
+                    BackColor = Config.BG,
+                    Size = new Size(20, 18),
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Cursor = Cursors.Hand,
+                    Location = new Point(_panelW - 12 - 22, 2),
+                };
+                _editBtn.Click += (s, e) => BeginTitleRename();
+                _nameEdit = new TextBox
+                {
+                    Font = new Font(Config.FontName, Config.FontSize),
+                    BackColor = Config.BG,
+                    ForeColor = Config.FG,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Location = new Point(0, 1),
+                    Width = Math.Max(60, _panelW - 12 - 24),
+                    Visible = false,
+                };
+                _nameEdit.KeyDown += (s, e) =>
+                {
+                    if (e.KeyCode == Keys.Return) { e.SuppressKeyPress = true; EndTitleRename(true); }
+                    else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; EndTitleRename(false); }
+                };
+                // 点别处 = 提交（与资源管理器重命名一致）
+                _nameEdit.LostFocus += (s, e) => { if (_nameEdit.Visible) EndTitleRename(true); };
+                _nameRow.Controls.Add(_titleLbl);
+                _nameRow.Controls.Add(_editBtn);
+                _nameRow.Controls.Add(_nameEdit);
+                Controls.Add(_nameRow);
+                curY += 22 + 2;
+
+                // 搜索框：默认隐藏，Ctrl+F 才展开（常驻输入框会带来假焦点/IME 遮挡问题）
+                _searchBorder = new Panel { BackColor = Config.Border, Location = new Point(6, curY), Size = new Size(_panelW - 12, 22), Visible = false };
                 _searchBox = new TextBox
                 {
                     Text = I18n.T("search"),
@@ -1254,15 +1518,14 @@ namespace HoverExplorer
                     ForeColor = Config.PlaceholderFg,
                     BorderStyle = BorderStyle.None,
                     Location = new Point(1, 2),
-                    Width = searchBorder.Width - 2,
+                    Width = _searchBorder.Width - 2,
                 };
-                _searchBox.GotFocus += (s, e) => { Program.DebugLog("[search] GotFocus level=" + _level + " text=\"" + _searchBox.Text + "\""); if (_searchBox.Text == I18n.T("search")) { _searchBox.Text = ""; _searchBox.ForeColor = Config.FG; } };
-                _searchBox.LostFocus += (s, e) => { Program.DebugLog("[search] LostFocus level=" + _level + " text=\"" + _searchBox.Text + "\" -> 恢复占位符"); if (string.IsNullOrEmpty(_searchBox.Text)) { _searchBox.Text = I18n.T("search"); _searchBox.ForeColor = Config.PlaceholderFg; } };
+                _searchBox.GotFocus += (s, e) => { if (_searchBox.Text == I18n.T("search")) { _searchBox.Text = ""; _searchBox.ForeColor = Config.FG; } };
+                _searchBox.LostFocus += (s, e) => { if (string.IsNullOrEmpty(_searchBox.Text)) { _searchBox.Text = I18n.T("search"); _searchBox.ForeColor = Config.PlaceholderFg; } };
                 _searchBox.TextChanged += (s, e) => FilterRows(_searchBox.Text);
-                _searchBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { _searchBox.Text = ""; FilterRows(""); } };
-                searchBorder.Controls.Add(_searchBox);
-                Controls.Add(searchBorder);
-                curY += 22 + 2;
+                _searchBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; ToggleSearch(); } };
+                _searchBorder.Controls.Add(_searchBox);
+                Controls.Add(_searchBorder);
                 _headH = curY;
 
                 // 实际拖动后才固定；单纯点击不固定
@@ -1274,11 +1537,13 @@ namespace HoverExplorer
                     if (Location != before && !_pinned) TogglePinPopup();
                 };
                 sortFlow.MouseDown += drag;
-                searchBorder.MouseDown += drag;
+                _nameRow.MouseDown += drag;
+                _searchBorder.MouseDown += drag;
                 // 顶部区域空白处右键 = 选项菜单
                 MouseEventHandler blankMenu = (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
                 sortFlow.MouseUp += blankMenu;
-                searchBorder.MouseUp += blankMenu;
+                _nameRow.MouseUp += blankMenu;
+                _searchBorder.MouseUp += blankMenu;
             }
             else
             {
@@ -1357,8 +1622,10 @@ namespace HoverExplorer
                     if (bw > maxW) maxW = bw;
                 }
             }
-            if (Config.PanelWidth > 0 && maxW < Config.PanelWidth) maxW = Config.PanelWidth;
+            if (Config.PanelWidth >= 200 && maxW < Config.PanelWidth) maxW = Config.PanelWidth;
             if (maxW > Math.Max(400, Config.PanelWidth)) maxW = Math.Max(400, Config.PanelWidth);
+            // 已固定的面板沿用固定时的宽度：条目少的目录刷新后不该被拉回默认宽度
+            if (_pinned && _pinnedW > 0) maxW = _pinnedW;
             _panelW = maxW;
 
             if (_level == 0)
@@ -1369,6 +1636,13 @@ namespace HoverExplorer
                     if (c is Panel && c.BackColor == Config.Border) c.Width = _panelW - 12;
                 }
                 if (_searchBox != null) _searchBox.Width = _panelW - 14;
+                if (_nameRow != null)
+                {
+                    _nameRow.Width = _panelW - 12;
+                    if (_titleLbl != null) _titleLbl.Width = Math.Max(40, _panelW - 12 - 24);
+                    if (_editBtn != null) _editBtn.Left = _panelW - 12 - 22;
+                    if (_nameEdit != null) _nameEdit.Width = Math.Max(60, _panelW - 12 - 24);
+                }
                 if (_sortFlow != null) _sortFlow.Width = _panelW - 12;
                 if (_pinBtn != null) { _pinBtn.Location = new Point(_panelW - 26, 7); _pinBtn.BringToFront(); }
             }
@@ -1472,8 +1746,11 @@ namespace HoverExplorer
             }
             var workArea = Screen.GetWorkingArea(Cursor.Position);
             int maxH = workArea.Height - 8;
-            if (Config.PanelHeight > 0) maxH = Math.Min(Config.PanelHeight, maxH);
+            // 记忆高度只作上限；过小的值基本是拖动小面板时误记的历史配置，当作未设置
+            if (Config.PanelHeight >= 150) maxH = Math.Min(Config.PanelHeight, maxH);
             int needH = curY + ry;
+            // 同理：固定面板沿用固定时的高度（内容变多时仍可更高，但不超过工作区）
+            if (_pinned && _pinnedH > 0 && needH < _pinnedH) needH = _pinnedH;
             if (needH > maxH)
             {
                 int scrollW = SystemInformation.VerticalScrollBarWidth;
@@ -1521,13 +1798,133 @@ namespace HoverExplorer
             };
             _gripTimer.Start();
 
-            if (_level == 0) FocusSearch();
+            // 不自动聚焦搜索框：后台进程在 Timer 里 Focus 只会得到"假焦点"
+            // （光标闪但键盘消息仍归真正的前台窗口），需要点一下搜索框才能真正输入
             return true;
         }
 
         public void FocusSearch()
         {
             if (_searchBox != null) _searchBox.Focus();
+        }
+
+        private static string ShowName(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "";
+            string n = Path.GetFileName(path);
+            return string.IsNullOrEmpty(n) ? path : n;
+        }
+
+        // Ctrl+F：展开/收起搜索框（默认隐藏，避免常驻输入框带来的假焦点与 IME 遮挡）
+        public void ToggleSearch()
+        {
+            if (_searchBorder == null || _searchBox == null || _listPanel == null) return;
+            bool on = !_searchBorder.Visible;
+            _searchBorder.Visible = on;
+            int dh = 24;
+            _listPanel.Top += on ? dh : -dh;
+            _listPanel.Height -= on ? dh : -dh;
+            _headH += on ? dh : -dh;
+            ClientSize = new Size(_panelW, ClientSize.Height + (on ? dh : -dh));
+            if (_pinned) _pinnedH = ClientSize.Height;
+            int lx = Left, ly = Top; ClampPos(ref lx, ref ly); Location = new Point(lx, ly);
+            if (on)
+            {
+                _searchBox.ForeColor = Config.FG;
+                _searchBox.Text = "";
+                _searchBox.Focus();
+            }
+            else
+            {
+                _searchBox.Text = I18n.T("search");
+                _searchBox.ForeColor = Config.PlaceholderFg;
+                FilterRows("");
+            }
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.F)) { ToggleSearch(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // 重命名文件/目录：非法字符与重名校验 + 固定项路径同步 + 相关面板刷新
+        public static bool RenamePath(string src, string newName)
+        {
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(newName)) return false;
+            newName = newName.Trim();
+            if (newName.Length == 0) return false;
+            if (newName.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) >= 0)
+            {
+                Program.Log("[重命名失败] 名称不能包含 \\ / : * ? \" < > |");
+                return false;
+            }
+            string dir = Path.GetDirectoryName(src);
+            if (string.IsNullOrEmpty(dir)) return false;
+            string dst = Path.Combine(dir, newName);
+            if (string.Equals(src, dst, StringComparison.OrdinalIgnoreCase)) return false;
+            try
+            {
+                if (Directory.Exists(src)) { if (Directory.Exists(dst)) return false; Directory.Move(src, dst); }
+                else { if (File.Exists(dst)) return false; File.Move(src, dst); }
+            }
+            catch (Exception ex) { Program.Log("[重命名失败] " + ex.Message); return false; }
+            // 固定项存的是路径，改名后要同步，否则固定卡片/面板指向失效路径
+            var pi = Config.PinnedItems.Find(p => string.Equals(p.Path, src, StringComparison.OrdinalIgnoreCase));
+            if (pi != null) { pi.Path = dst; Config.Save(); }
+            Program.RefreshPanelsShowing(dir, null);
+            Program.DebugLog("[rename] " + src + " -> " + dst);
+            return true;
+        }
+
+        // 顶部名称就地改名：改的是面板自己的根目录，成功后要更新 _path / 标题 / 子面板路径
+        private void BeginTitleRename()
+        {
+            if (_nameEdit == null || _titleLbl == null || string.IsNullOrEmpty(_path)) return;
+            _nameEdit.Text = ShowName(_path);
+            _nameEdit.Visible = true;
+            _nameEdit.BringToFront();
+            _titleLbl.Visible = false;
+            if (_editBtn != null) _editBtn.Visible = false;
+            _nameEdit.Focus();
+            _nameEdit.SelectAll();
+        }
+
+        private void EndTitleRename(bool commit)
+        {
+            if (_nameEdit == null || !_nameEdit.Visible) return;
+            string nn = commit ? _nameEdit.Text.Trim() : "";
+            bool ok = false;
+            if (commit && !string.IsNullOrEmpty(nn))
+            {
+                string old = _path;
+                string target = Path.Combine(Path.GetDirectoryName(old), nn);
+                if (!string.Equals(old, target, StringComparison.OrdinalIgnoreCase) && RenamePath(old, nn))
+                {
+                    _path = target;
+                    Program.RebasePaths(old, target);
+                    ok = true;
+                }
+            }
+            _nameEdit.Visible = false;
+            _titleLbl.Visible = true;
+            if (_editBtn != null) _editBtn.Visible = true;
+            _titleLbl.Text = ShowName(_path);
+            if (ok && _titleTip != null) _titleTip.SetToolTip(_titleLbl, _path);
+        }
+
+        // 目录改名后同步本面板路径（子面板路径以旧目录为前缀，一并改写）
+        internal void RebasePath(string oldPrefix, string newPrefix)
+        {
+            if (string.IsNullOrEmpty(_path)) return;
+            if (string.Equals(_path, oldPrefix, StringComparison.OrdinalIgnoreCase)) _path = newPrefix;
+            else if (_path.StartsWith(oldPrefix + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                _path = newPrefix + _path.Substring(oldPrefix.Length);
+        }
+
+        public static void RebaseFilePreviewPath(string oldPrefix, string newPrefix)
+        {
+            if (_extPreviewForm != null && !_extPreviewForm.IsDisposed) _extPreviewForm.RebaseFilePath(oldPrefix, newPrefix);
         }
 
         private void SortEntries(string path, ref string[] entries)
@@ -1835,12 +2232,12 @@ namespace HoverExplorer
                         else if (result.Kind == PreviewResult.KindEnum.Media)
                         {
                             var ctl = MediaPreview.MediaPlayer(full, result.IsVideo, result.DisplayW, result.DisplayH);
-                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height, result.IsVideo ? "video" : "audio");
                         }
                         else if (result.Kind == PreviewResult.KindEnum.SvgHtml)
                         {
                             var ctl = MediaPreview.SvgBrowserPanel(full);
-                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                            _previewForm = new PreviewForm(ctl, ctl.Width, ctl.Height, "svg");
                         }
                         else
                         {
@@ -1852,6 +2249,9 @@ namespace HoverExplorer
                         _previewForm.OnFileSwitched = p => HighlightPath(p);
 
                         _previewForm.Show();
+                        // 同上：面板内预览也要在 Show 后立即置顶
+                        NativeMethods.SetWindowPos(_previewForm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
                         NativeMethods.POINT _spt; NativeMethods.GetCursorPos(out _spt);
                         Program.DebugLog("[panel-preview] SHOW level=" + _level + " " + full + " at " + _previewForm.Left + "," + _previewForm.Top + " size " + _previewForm.Width + "x" + _previewForm.Height + " mouse=" + _spt.X + "," + _spt.Y);
                     });
@@ -1901,7 +2301,8 @@ namespace HoverExplorer
             if (_extPreviewTimer != null) { _extPreviewTimer.Stop(); _extPreviewTimer.Dispose(); _extPreviewTimer = null; }
             _extPreviewPath = null;
             if (_extPreviewCloseTimer != null) { _extPreviewCloseTimer.Stop(); _extPreviewCloseTimer.Dispose(); _extPreviewCloseTimer = null; }
-            if (_extPreviewForm != null && !_extPreviewForm.Pinned) { Program.DebugLog("[preview] cancel-existing-form"); CloseExtPreviewForm(); }
+            // 正在就地改名时不关窗口（输入焦点在编辑框里）
+            if (_extPreviewForm != null && !_extPreviewForm.Pinned && !_extPreviewForm.Editing) { Program.DebugLog("[preview] cancel-existing-form"); CloseExtPreviewForm(); }
         }
 
         public static bool FilePreviewContainsPoint(int x, int y)
@@ -1914,7 +2315,7 @@ namespace HoverExplorer
         public static void EnsureExtPreviewTopmost()
         {
             if (_extPreviewForm == null || !_extPreviewForm.IsHandleCreated || !_extPreviewForm.Visible) return;
-            EnsureWinTopmost(_extPreviewForm.Handle, "extpreview " + _extPreviewForm.FilePath);
+            EnsureWinTopmost(_extPreviewForm.Handle, "extpreview[" + _extPreviewForm.MediaKind + "] " + _extPreviewForm.FilePath);
         }
 
         public static void ScheduleExtPreviewClose(int mx, int my)
@@ -1928,6 +2329,8 @@ namespace HoverExplorer
                 ((Timer)s).Stop(); ((Timer)s).Dispose(); _extPreviewCloseTimer = null;
                 NativeMethods.POINT pt;
                 NativeMethods.GetCursorPos(out pt);
+                // 就地改名期间挂起自动关闭，否则一输入窗口就没了
+                if (_extPreviewForm != null && _extPreviewForm.Editing) return;
                 if (_extPreviewForm != null && !_extPreviewForm.Pinned && _extPreviewForm.ContainsPoint(pt.X, pt.Y))
                     ScheduleExtPreviewClose(pt.X, pt.Y);
                 else if (_extPreviewForm != null && !_extPreviewForm.Pinned) CloseExtPreviewForm();
@@ -1984,12 +2387,12 @@ namespace HoverExplorer
                         if (result.Kind == PreviewResult.KindEnum.Media)
                         {
                             var ctl = MediaPreview.MediaPlayer(full, result.IsVideo, result.DisplayW, result.DisplayH);
-                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height, result.IsVideo ? "video" : "audio");
                         }
                         else if (result.Kind == PreviewResult.KindEnum.SvgHtml)
                         {
                             var ctl = MediaPreview.SvgBrowserPanel(full);
-                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height);
+                            _extPreviewForm = new PreviewForm(ctl, ctl.Width, ctl.Height, "svg");
                         }
                         else if (result.Kind == PreviewResult.KindEnum.Image)
                         {
@@ -2007,6 +2410,9 @@ namespace HoverExplorer
                         ApplyHeader(_extPreviewForm, full);
 
                         _extPreviewForm.Show();
+                        // 刚创建的窗口最容易被刚激活的资源管理器压住，Show 后立即补一次置顶
+                        NativeMethods.SetWindowPos(_extPreviewForm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
                         Program.DebugLog("[preview] SHOW " + full + " at " + _extPreviewForm.Left + "," + _extPreviewForm.Top + " size " + _extPreviewForm.Width + "x" + _extPreviewForm.Height);
                     }, null);
                 }
@@ -2068,8 +2474,9 @@ namespace HoverExplorer
         private void PositionPreview(RowLabel row)
         {
             if (_previewForm == null) return;
-            int lx = row.PointToScreen(Point.Empty).X;
-            int rx = row.PointToScreen(new Point(row.Width, 0)).X;
+            // 用面板自身边界定位：列表出现滚动条时行宽比面板窄（扣掉了滚动条宽度），
+            // 按行右边界算会让预览窗压进面板里几个像素
+            int lx = Left, rx = Right;
             int x = rx + 8, y = row.PointToScreen(Point.Empty).Y;
             int pw = _previewForm.Width, ph = _previewForm.Height;
             NativeMethods.POINT pt;
@@ -2100,7 +2507,7 @@ namespace HoverExplorer
             if (y + ph > wb) y = wb - ph - 4;
             if (y < wt) y = wt + 4;
             _previewForm.Location = new Point(x, y);
-            Program.DebugLog("[panel-preview] position level=" + _level + " rowL=" + lx + " rowR=" + rx + " rowY=" + row.PointToScreen(Point.Empty).Y + " pvSize=" + pw + "x" + ph + " -> pvAt=" + x + "," + y + " workArea=" + wl + "," + wt + "-" + wr + "," + wb + " mouse=" + pt.X + "," + pt.Y);
+            Program.DebugLog("[panel-preview] position level=" + _level + " panelL=" + lx + " panelR=" + rx + " rowY=" + row.PointToScreen(Point.Empty).Y + " pvSize=" + pw + "x" + ph + " -> pvAt=" + x + "," + y + " workArea=" + wl + "," + wt + "-" + wr + "," + wb + " mouse=" + pt.X + "," + pt.Y);
         }
 
         private void OnRowDown(RowLabel row, MouseEventArgs e)
@@ -2330,14 +2737,12 @@ namespace HoverExplorer
                 {
                     if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.NewName) && dlg.NewName != oldName)
                     {
-                        try
+                        // 复用统一入口：校验非法字符/重名、同步固定项路径、刷新相关面板
+                        if (RenamePath(row.Full, dlg.NewName))
                         {
-                            string newPath = Path.Combine(Path.GetDirectoryName(row.Full), dlg.NewName);
-                            if (Directory.Exists(row.Full)) Directory.Move(row.Full, newPath);
-                            else File.Move(row.Full, newPath);
+                            if (row.IsDir) Program.RebasePaths(row.Full, Path.Combine(Path.GetDirectoryName(row.Full), dlg.NewName));
                             OnMoveDone();
                         }
-                        catch (Exception ex) { Program.Log("[重命名失败] " + ex.Message); }
                     }
                 }
             }
@@ -2422,6 +2827,9 @@ namespace HoverExplorer
         {
             _pinned = !_pinned;
             if (_pinBtn != null) _pinBtn.Image = PreviewForm.PinIcon(_pinned);
+            // 固定瞬间锁住当前尺寸，取消固定后回到内容自适应
+            if (_pinned) { _pinnedW = ClientSize.Width; _pinnedH = ClientSize.Height; }
+            else { _pinnedW = 0; _pinnedH = 0; }
         }
 
         // 统一保顶：先恢复丢失的 WS_EX_TOPMOST（Show/Focus 激活会清），再按需提顶。
@@ -2430,33 +2838,90 @@ namespace HoverExplorer
         // （TopMost 丢了 → CoveredByOther 首个上方窗口非 TopMost → return false → 永不提顶 → 永被盖住）
         private static DateTime _lastRestoreLog;
         private static DateTime _lastRaiseLog;
+        private static DateTime _lastRaiseTime;
+
+        // 命中测试：直接看 h 的位置上最顶层是谁。
+        // 覆盖 CoveredByOther 漏判的情形——压住者不是 TopMost（说明 h 的 TopMost 已被系统重排/丢失），
+        // 或 z 序被外部工具改动。外部进程窗口才计数，本进程窗口之间的相对顺序保持不动，避免互相翻转闪烁。
+        private static bool CoveredByHitTest(IntPtr h)
+        {
+            try
+            {
+                int ex = NativeMethods.GetWindowLongW(h, NativeMethods.GWL_EXSTYLE);
+                // 鼠标穿透窗口不会出现在命中测试里，跳过以免误判
+                if ((ex & 0x20) != 0) return false;
+                NativeMethods.RECT rc;
+                if (!NativeMethods.GetWindowRect(h, out rc)) return false;
+                if (rc.Right - rc.Left < 8 || rc.Bottom - rc.Top < 8) return false;
+                int[] xs = { (rc.Left + rc.Right) / 2, rc.Left + 3, rc.Right - 3 };
+                int[] ys = { (rc.Top + rc.Bottom) / 2, rc.Top + 3, rc.Bottom - 3 };
+                int total = 0, covered = 0;
+                foreach (int x in xs)
+                {
+                    foreach (int y in ys)
+                    {
+                        total++;
+                        IntPtr top = NativeMethods.WindowFromPoint(new NativeMethods.POINT { X = x, Y = y });
+                        if (top == IntPtr.Zero || top == h) continue;
+                        bool mine = false;
+                        IntPtr cur = top;
+                        for (int i = 0; i < 8 && cur != IntPtr.Zero; i++)
+                        {
+                            if (cur == h) { mine = true; break; }
+                            cur = NativeMethods.GetParent(cur);
+                        }
+                        if (mine) continue;
+                        uint pid;
+                        NativeMethods.GetWindowThreadProcessId(top, out pid);
+                        if (pid == Program.CurrentPid) continue;
+                        covered++;
+                    }
+                }
+                return covered * 2 >= total;
+            }
+            catch { return false; }
+        }
+
         public static void EnsureWinTopmost(IntPtr h, string tag)
         {
             if (h == IntPtr.Zero) return;
+            // 窗口内控件正在输入（搜索框/文本框）：停止提顶，否则每 Tick 提顶会盖住 IME 候选窗
+            try
+            {
+                var f = Control.FromHandle(h) as Form;
+                if (f != null && f.ContainsFocus) return;
+            }
+            catch { }
             try
             {
                 int ex = NativeMethods.GetWindowLongW(h, NativeMethods.GWL_EXSTYLE);
                 if ((ex & (int)NativeMethods.WS_EX_TOPMOST) == 0)
                 {
-                    NativeMethods.SetWindowPos(h, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                        NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
                     if ((DateTime.UtcNow - _lastRestoreLog).TotalMilliseconds > 500)
                     {
                         _lastRestoreLog = DateTime.UtcNow;
-                        Program.DebugLog("[z] restore " + tag);
+                        Program.DebugLog("[z] lost-topmost " + tag + " ex=0x" + ex.ToString("X"));
                     }
-                    return;
                 }
             }
             catch { }
-            if (Program.CoveredByOther(h))
+            // 每 Tick 无条件维持 TOPMOST：该样式会被系统/WinForms 在显示流程里反复清掉，
+            // 只在"检测到缺失"时才补，会让窗口整整一 Tick 沉在前台窗口下面（音频预览最明显）
+            NativeMethods.SetWindowPos(h, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+            bool byOther = Program.CoveredByOther(h);
+            bool byHit = !byOther && CoveredByHitTest(h);
+            if (byOther || byHit)
             {
+                // 节流：与外部置顶窗口竞争时不要每 Tick 反复提顶导致闪烁
+                if ((DateTime.UtcNow - _lastRaiseTime).TotalMilliseconds < 120) return;
+                _lastRaiseTime = DateTime.UtcNow;
                 NativeMethods.SetWindowPos(h, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
                     NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
                 if ((DateTime.UtcNow - _lastRaiseLog).TotalMilliseconds > 300)
                 {
                     _lastRaiseLog = DateTime.UtcNow;
-                    Program.DebugLog("[z] raise " + tag);
+                    Program.DebugLog("[z] raise " + tag + (byHit ? " (hit-test)" : ""));
                 }
             }
         }
@@ -2466,7 +2931,7 @@ namespace HoverExplorer
             if (!IsHandleCreated || !Visible) return;
             EnsureWinTopmost(Handle, "panel L" + _level + " " + _path);
             if (_previewForm != null && _previewForm.IsHandleCreated && _previewForm.Visible)
-                EnsureWinTopmost(_previewForm.Handle, "preview " + _path);
+                EnsureWinTopmost(_previewForm.Handle, "preview[" + _previewForm.MediaKind + "] " + _path);
         }
     }
 

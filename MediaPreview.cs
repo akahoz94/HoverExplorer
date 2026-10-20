@@ -122,7 +122,27 @@ namespace HoverExplorer
             me.MediaOpened += delegate
             {
                 loaded = true;
+                Program.DebugLog("[mp] media-opened " + (isVideo ? "video" : "audio") + " " + path);
                 if (me.NaturalDuration.HasTimeSpan) total = me.NaturalDuration.TimeSpan;
+                // 视频拿到真实分辨率后，让预览窗按该宽高比调整（音频没有画面，不动）
+                // WPF 宿主（ElementHost/MediaElement）初始化完成后再保一次顶：
+                // 媒体面板加载期间窗口易被刚激活的资源管理器压到下面
+                try
+                {
+                    var owner = panel.FindForm();
+                    if (owner != null && owner.IsHandleCreated)
+                        PopupForm.EnsureWinTopmost(owner.Handle, "media-opened " + (isVideo ? "video" : "audio"));
+                }
+                catch { }
+                if (isVideo && me.NaturalVideoWidth > 0 && me.NaturalVideoHeight > 0)
+                {
+                    try
+                    {
+                        var form = panel.FindForm() as PreviewForm;
+                        if (form != null) form.FitVideoAspect(me.NaturalVideoWidth, me.NaturalVideoHeight);
+                    }
+                    catch { }
+                }
             };
             me.MediaFailed += delegate(object s2, ExceptionRoutedEventArgs e2)
             {

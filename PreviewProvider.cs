@@ -151,7 +151,8 @@ namespace HoverExplorer
         // ===== 视频/音频：WPF MediaElement 播放器（零部署，Media Foundation 解码）=====
         private static PreviewResult GenVideo(string full)
         {
-            return new PreviewResult { Kind = PreviewResult.KindEnum.Media, IsVideo = true, DisplayW = 320, DisplayH = 240 };
+            // 初始尺寸，打开后按视频真实宽高比再校正（见 PreviewForm.FitVideoAspect）
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Media, IsVideo = true, DisplayW = 360, DisplayH = 240 };
         }
 
         // SVG：IE 引擎渲染图形 + 下方显示源码（深色模式图形垫浅色底）

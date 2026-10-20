@@ -12,7 +12,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.3";
+        public const string Version = "1.0.4";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -30,9 +30,26 @@ namespace HoverExplorer
                 if (p.ShowingPath(dir1) || (dir2 != null && p.ShowingPath(dir2))) p.RefreshPanel();
             }
         }
+        // 目录改名后同步已打开面板/悬停预览里的路径，避免它们仍指向改名前的旧路径
+        public static void RebasePaths(string oldPrefix, string newPrefix)
+        {
+            if (string.IsNullOrEmpty(oldPrefix) || string.IsNullOrEmpty(newPrefix)) return;
+            PopupForm.RebaseFilePreviewPath(oldPrefix, newPrefix);
+            foreach (var p in _panels)
+            {
+                if (p.IsDisposed) continue;
+                p.RebasePath(oldPrefix, newPrefix);
+            }
+        }
+
         private static string _hoverFolder;
         private static string _extHoverFile;
         private static string _lastHoverPath;
+        // 上一 Tick 的指针位置：用于判断"指针是否真的移动过"
+        // （悬停的正确语义是"指针移上来"，光看"坐标下的目标变了"会被切换标签页/列表刷新骗到）
+        private static int _lastTickX = int.MinValue, _lastTickY = int.MinValue;
+        // 前台窗口正处于输入态（资源管理器重命名/地址栏）时的抑制标记，仅用于日志节流
+        private static DateTime _lastEditLog;
         private static DateTime _extNullSince = DateTime.MinValue;
         private static DateTime _hoverStart;
         private static DateTime _closeStart = DateTime.MinValue;
@@ -345,6 +362,7 @@ namespace HoverExplorer
         }
 
         private static readonly uint _currentPid = (uint)Process.GetCurrentProcess().Id;
+        public static uint CurrentPid { get { return _currentPid; } }
 
         private static DateTime _lastCoverLog;
         // h 是否被其他进程的 TopMost 窗口压住（从 TopMost band 顶到 h 之间存在外部窗口）。
@@ -385,6 +403,35 @@ namespace HoverExplorer
                 return false;
             }
             catch (Exception ex) { DebugLog("[z] CoveredByOther ex: " + ex.Message); return false; }
+        }
+
+        // 前台窗口正在输入（资源管理器重命名编辑框 / 地址栏）：此时不该弹任何悬停面板或预览。
+        // 用 GetGUIThreadInfo 取前台线程的焦点控件判类名，比 UIA 便宜得多（每 Tick 可调）。
+        // 本进程窗口（自己的搜索框/预览文本框）不算，否则一输入就把自己关了。
+        public static bool IsEditingInForeground()
+        {
+            try
+            {
+                IntPtr fg = NativeMethods.GetForegroundWindow();
+                if (fg == IntPtr.Zero) return false;
+                uint pid;
+                uint tid = NativeMethods.GetWindowThreadProcessId(fg, out pid);
+                if (tid == 0 || pid == _currentPid) return false;
+                var gti = new NativeMethods.GUITHREADINFO { cbSize = Marshal.SizeOf(typeof(NativeMethods.GUITHREADINFO)) };
+                if (!NativeMethods.GetGUIThreadInfo(tid, ref gti) || gti.hwndFocus == IntPtr.Zero) return false;
+                var sb = new System.Text.StringBuilder(64);
+                NativeMethods.GetClassName(gti.hwndFocus, sb, 64);
+                string cls = sb.ToString();
+                // Edit / RichEdit*：重命名框、地址栏、Explorer 搜索框都是这类
+                bool editing = cls == "Edit" || cls.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase);
+                if (editing && (DateTime.UtcNow - _lastEditLog).TotalMilliseconds > 1000)
+                {
+                    _lastEditLog = DateTime.UtcNow;
+                    DebugLog("[tick] foreground editing (" + cls + "), suppress hover");
+                }
+                return editing;
+            }
+            catch { return false; }
         }
 
         public static bool IsPinned(string path) { return Config.PinnedItems.Exists(p => p.Path == path); }
@@ -468,6 +515,8 @@ namespace HoverExplorer
             NativeMethods.POINT pt;
             NativeMethods.GetCursorPos(out pt);
             int mx = pt.X, my = pt.Y;
+            bool mouseMoved = (mx != _lastTickX || my != _lastTickY);
+            _lastTickX = mx; _lastTickY = my;
 
             if (Control.MouseButtons == MouseButtons.Left)
             {
@@ -503,6 +552,18 @@ namespace HoverExplorer
                 return;
             }
 
+            // 前台正在输入（重命名编辑框 / 地址栏 / Explorer 搜索框）：
+            // 此时任何悬停面板/预览都会打断输入并遮挡编辑框，直接短路并收起未固定的面板
+            if (IsEditingInForeground())
+            {
+                PopupForm.CancelFilePreview();
+                _extHoverFile = null;
+                _hoverFolder = null;
+                foreach (var p in _panels) { if (!p.IsDisposed && !p.Pinned) p.ClosePanel(); }
+                _panels.RemoveAll(p => p.IsDisposed);
+                return;
+            }
+
             string hoverPath = null;
             bool hoverIsDir = false;
             Rectangle hoverRect = Rectangle.Empty;
@@ -533,8 +594,14 @@ namespace HoverExplorer
                 _extNullSince = DateTime.MinValue;
                 if (hoverFile != _extHoverFile)
                 {
-                    _extHoverFile = hoverFile;
-                    PopupForm.ScheduleFilePreview(hoverFile, new Point(mx, my));
+                    // 指针没动却换了目标（切标签页、列表刷新）不是用户主动悬停，先不预览
+                    if (!mouseMoved)
+                        DebugLog("[preview] target changed w/o mouse move, hold: " + hoverFile);
+                    else
+                    {
+                        _extHoverFile = hoverFile;
+                        PopupForm.ScheduleFilePreview(hoverFile, new Point(mx, my));
+                    }
                 }
             }
             else if (_extHoverFile != null)
@@ -558,10 +625,20 @@ namespace HoverExplorer
             _closeStart = DateTime.MinValue;
             if (hoverFolder != _hoverFolder)
             {
-                DebugLog("[hover-dir] new target " + hoverFolder);
-                _hoverFolder = hoverFolder;
-                _hoverStart = DateTime.UtcNow;
-                return;
+                if (!mouseMoved)
+                {
+                    // 指针静止而坐标下的目标变了（切换 Explorer 标签页/目录、列表刷新），
+                    // 这不是"用户把指针移上来"，不触发；一直顺延计时，鼠标动一下才重新判定
+                    DebugLog("[hover-dir] target changed w/o mouse move, hold: " + hoverFolder);
+                    _hoverStart = DateTime.UtcNow;
+                }
+                else
+                {
+                    DebugLog("[hover-dir] new target " + hoverFolder);
+                    _hoverFolder = hoverFolder;
+                    _hoverStart = DateTime.UtcNow;
+                    return;
+                }
             }
 
             if ((DateTime.UtcNow - _hoverStart).TotalSeconds >= Config.HoverDelay)
@@ -578,7 +655,6 @@ namespace HoverExplorer
                         ShowHighlight(hoverRect);
                         _panels.Add(p2);
                         p2.Show();
-                        p2.FocusSearch();
                         DebugLog("[panel] OPENED at " + p2.Left + "," + p2.Top + " size " + p2.Width + "x" + p2.Height);
                     }
                 }

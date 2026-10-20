@@ -37,6 +37,15 @@ namespace HoverExplorer
             Set(handle, 33, 1);
         }
 
+        // 对话框用：只要暗色模式与圆角，不加 CS_DROPSHADOW（否则下/右会出现硬边投影）
+        public static void ApplyRounded(IntPtr handle, bool dark)
+        {
+            if (handle == IntPtr.Zero) return;
+            Set(handle, 20, dark ? 1 : 0);
+            if (Build < 22000) return;
+            Set(handle, 33, 2);
+        }
+
         // 控件滚动条深色化：uxtheme 非公开入口 AllowDarkModeForWindow(#133) + DarkMode_Explorer 主题
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
         static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);

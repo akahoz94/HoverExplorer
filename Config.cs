@@ -42,7 +42,21 @@ namespace HoverExplorer
         public static int CheckInterval = 80;
         public static int PopupOffset = 16;
         public static int SubGap = 4;
-        public static int MaxItems = 40;
+        public static int MaxItems = 200;
+        public static int PreviewMinWidth = 240;
+        public static bool PreviewOriginalSize = false;
+        // 记住的图片预览窗口尺寸（右下角手柄拖拽 / Ctrl+滚轮 调整后写入）；0 = 未设置，走自动尺寸
+        public static int PreviewImgW = 0;
+        public static int PreviewImgH = 0;
+        // 记住的媒体（视频/音频/SVG）预览窗口尺寸；0 = 未设置，走自动尺寸
+        public static int PreviewMediaW = 0;
+        public static int PreviewMediaH = 0;
+        // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
+        public static double PreviewMaxRatio = 0.8;
+        // 固定为"仅图标/名称触发"（已移除该开关）
+        public static readonly bool NameOnlyTrigger = true;
+        public static int PanelWidth = 0;
+        public static int PanelHeight = 0;
         public static bool ExplorerEnabled = false;
         public static bool PreviewFiles = true;
         public static bool DebugLog = false;
@@ -132,6 +146,15 @@ namespace HoverExplorer
                         case "PopupOffset": PopupOffset = Convert.ToInt32(v); break;
                         case "SubGap": SubGap = Convert.ToInt32(v); break;
                         case "MaxItems": MaxItems = Convert.ToInt32(v); break;
+                        case "PreviewMinWidth": PreviewMinWidth = Convert.ToInt32(v); break;
+                        case "PreviewOriginalSize": PreviewOriginalSize = Convert.ToBoolean(v); break;
+                        case "PreviewImgW": PreviewImgW = Convert.ToInt32(v); break;
+                        case "PreviewImgH": PreviewImgH = Convert.ToInt32(v); break;
+                        case "PreviewMediaW": PreviewMediaW = Convert.ToInt32(v); break;
+                        case "PreviewMediaH": PreviewMediaH = Convert.ToInt32(v); break;
+                        case "PreviewMaxRatio": PreviewMaxRatio = Convert.ToDouble(v); break;
+                        case "PanelWidth": PanelWidth = Convert.ToInt32(v); break;
+                        case "PanelHeight": PanelHeight = Convert.ToInt32(v); break;
                         case "TextPreviewLines": TextPreviewLines = Convert.ToInt32(v); break;
                         case "ExplorerEnabled": ExplorerEnabled = Convert.ToBoolean(v); break;
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
@@ -185,6 +208,15 @@ namespace HoverExplorer
                 data["Language"] = Language;
                 data["Theme"] = Theme;
                 data["HoverDelay"] = HoverDelay;
+                data["PreviewMinWidth"] = PreviewMinWidth;
+                data["PreviewOriginalSize"] = PreviewOriginalSize;
+                data["PreviewImgW"] = PreviewImgW;
+                data["PreviewImgH"] = PreviewImgH;
+                data["PreviewMediaW"] = PreviewMediaW;
+                data["PreviewMediaH"] = PreviewMediaH;
+                data["PreviewMaxRatio"] = PreviewMaxRatio;
+                data["PanelWidth"] = PanelWidth;
+                data["PanelHeight"] = PanelHeight;
                 data["PinnedItems"] = PinnedItems;
                 var jss2 = new JavaScriptSerializer();
                 File.WriteAllText(p, jss2.Serialize(data));

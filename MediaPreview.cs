@@ -128,7 +128,8 @@ namespace HoverExplorer
             {
                 if (isVideo)
                 {
-                    var thumb = ShellThumb(path, Config.PreviewMax * 2, false);
+                    // 解码失败才回退缩略图：按面板实际宽度取图，避免放大后是拉糊的小图
+                    var thumb = ShellThumb(path, Math.Max(Config.PreviewMax * 2, panel.Width), false);
                     if (thumb != null)
                     {
                         host.Hide();

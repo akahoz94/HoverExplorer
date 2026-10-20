@@ -104,6 +104,8 @@ namespace HoverExplorer
             {"hover_delay_desc", new[]{"鼠标悬停多久后弹出预览","Delay before preview appears","プレビューが表示されるまでの時間","미리보기가 표시되기까지의 시간","Délai avant l'aperçu","Время до появления предпросмотра","Tiempo antes de la vista previa"}},
             {"pin_launch", new[]{"钉为启动卡片","Pin as launch card","ピン（起動カード）","핀 (실행 카드)","Épingler (carte lancement)","Закр. (карта запуска)","Fijar (tarjeta inicio)"}},
             {"unpin", new[]{"取消固定","Unpin","解除","고정해제","Détacher","Открепить","Soltar"}},
+            {"preview_orig", new[]{"原图大小","Original size","オリジナルサイズ","원본 크기","Taille d'origine","Исходный размер","Tamaño original"}},
+            {"empty", new[]{"(空文件夹)","(empty folder)","(空のフォルダ)","(빈 폴더)","(dossier vide)","(пустая папка)","(carpeta vacía)"}},
         };
 
         public static string T(string key)

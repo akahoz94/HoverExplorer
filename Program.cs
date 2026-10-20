@@ -12,7 +12,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.2";
+        public const string Version = "1.0.3";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -172,6 +172,15 @@ namespace HoverExplorer
                 Config.Save();
             };
             trayMenu.Items.Add(previewItem);
+            var origItem = new ToolStripMenuItem(I18n.T("preview_orig"));
+            origItem.CheckOnClick = true;
+            origItem.Checked = Config.PreviewOriginalSize;
+            origItem.CheckedChanged += (s, e) =>
+            {
+                Config.PreviewOriginalSize = origItem.Checked;
+                Config.Save();
+            };
+            trayMenu.Items.Add(origItem);
             var debugItem = new ToolStripMenuItem(I18n.T("debug_log"));
             debugItem.CheckOnClick = true;
             debugItem.Checked = Config.DebugLog;
@@ -258,6 +267,7 @@ namespace HoverExplorer
                     sub.Checked = true;
                     explorerItem.Text = I18n.T("explorer_hover");
                     previewItem.Text = I18n.T("file_preview");
+                    origItem.Text = I18n.T("preview_orig");
                     debugItem.Text = I18n.T("debug_log");
                     tooltipItem.Text = I18n.T("hide_tooltip");
                     autostartItem.Text = I18n.T("autostart");

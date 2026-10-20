@@ -50,6 +50,41 @@ namespace HoverExplorer
         }
     }
 
+    internal class SizeGripCtl : Control
+    {
+        private bool _hover;
+
+        public SizeGripCtl()
+        {
+            SetStyle(ControlStyles.SupportsTransparentBackColor
+                | ControlStyles.UserPaint
+                | ControlStyles.AllPaintingInWmPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+            BackColor = Color.Transparent;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            // 空闲时很淡，鼠标移到角上才加亮：避免常显手柄遮挡右下角信息
+            int a = _hover ? 220 : 80;
+            int len = Math.Min(Width, Height) - 8;
+            if (len < 4) len = 4;
+            int m = 3;
+            int x = Width - 1 - m, y = Height - 1 - m;   // 角的顶点（右下）
+            using (var pen = new Pen(Color.FromArgb(a, Config.PlaceholderFg), _hover ? 1.6f : 1.2f))
+            {
+                // 反向 "L"：沿右边缘的短线 + 沿下边缘的短线，构成右下角标
+                g.DrawLine(pen, x, y, x, y - len);
+                g.DrawLine(pen, x, y, x - len, y);
+            }
+        }
+    }
+
     internal class PreviewForm : Form
     {
         // 不抢前台：预览仅为悬停展示，激活会打断当前窗口的焦点
@@ -75,12 +110,16 @@ namespace HoverExplorer
         private Control _content;
         private SizeGripCtl _grip;
         public string FilePath;
+        public Action<string> OnFileSwitched;
         private Label _pinLaunchBtn;
+        private double _zoom = 1.0;
+        private WheelFilter _wheelFilter;
 
         private bool _textDirty;
 
         private Timer _unpinCloseTimer;
         private Timer _gripTimer;
+        private Timer _sizeSaveTimer;
 
 
 
@@ -95,6 +134,7 @@ namespace HoverExplorer
             _scrollPanel.Controls.Add(pb);
             BindResize(pb);
             ClientSize = new Size(img.Width, img.Height);
+            ApplyImageSize(img.Width, img.Height);
 
         }
 
@@ -107,6 +147,7 @@ namespace HoverExplorer
             _scrollPanel.Controls.Add(pb);
             BindResize(pb);
             ClientSize = new Size(displayW, displayH);
+            ApplyImageSize(displayW, displayH);
 
         }
 
@@ -152,15 +193,16 @@ namespace HoverExplorer
 
         }
 
-        // 自定义内容面板（音频播放器 / SVG 浏览器）
+        // 自定义内容面板（视频/音频播放器 / SVG 浏览器）
         public PreviewForm(Control content, int w, int h)
             : this()
         {
             _content = content;
+            // 关键：填充滚动面板，窗口调整大小时内容（视频画面）才会跟着变
+            content.Dock = DockStyle.Fill;
             _scrollPanel.Controls.Add(content);
             BindResize(content);
-            ClientSize = new Size(w, h + 34);
-
+            ApplyContentSize(w, h);
         }
 
         private PreviewForm()
@@ -172,6 +214,20 @@ namespace HoverExplorer
             BackColor = Config.BG;
             DoubleBuffered = true;
             SetStyle(ControlStyles.ResizeRedraw, true);
+
+            KeyPreview = true;
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+            _wheelFilter = new WheelFilter(this);
+            Application.AddMessageFilter(_wheelFilter);
+            FormClosed += (s, e) =>
+            {
+                try { Application.RemoveMessageFilter(_wheelFilter); } catch { }
+                if (_sizeSaveTimer != null)
+                {
+                    _sizeSaveTimer.Stop(); _sizeSaveTimer.Dispose(); _sizeSaveTimer = null;
+                    try { Config.Save(); } catch { }
+                }
+            };
 
             _toolbar = new Panel { BackColor = Config.BG, Height = 34 };
             Controls.Add(_toolbar);
@@ -368,39 +424,228 @@ namespace HoverExplorer
 
         protected override void WndProc(ref Message m)
         {
+            // WM_EXITSIZEMOVE：右下角手柄/边缘拖拽结束后记住尺寸（图片与媒体面板都记）
+            if (m.Msg == 0x232 && (_content is PictureBox || _content is Panel))
+            {
+                if (_content is PictureBox && ClientSize.Width >= 120) Config.PreviewMinWidth = ClientSize.Width;
+                RememberSize(ClientSize.Width, ClientSize.Height);
+                Program.DebugLog("[pv-size] resize-end " + ClientSize.Width + "x" + ClientSize.Height);
+            }
             base.WndProc(ref m);
         }
 
-        // 右下角缩放手柄：透明背景 + 半透明斜线，悬停时增亮
-        private class SizeGripCtl : Control
+        // 图片预览尺寸入口：优先套用记住的尺寸，否则走自动尺寸
+        private void ApplyImageSize(int w, int h)
         {
-            private bool _hover;
-
-            public SizeGripCtl()
+            if (Config.PreviewImgW > 0 && Config.PreviewImgH > 0)
             {
-                SetStyle(ControlStyles.SupportsTransparentBackColor
-                    | ControlStyles.UserPaint
-                    | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer, true);
-                BackColor = Color.Transparent;
+                var wa0 = Screen.GetWorkingArea(this);
+                int rw = Math.Max(120, Math.Min(Config.PreviewImgW, wa0.Width - 20));
+                int rh = Math.Max(90, Math.Min(Config.PreviewImgH, wa0.Height - 20));
+                ClientSize = new Size(rw, rh);
+                Program.DebugLog("[pv-size] remembered " + rw + "x" + rh);
+                return;
             }
+            AutoFitSize(w, h);
+        }
 
-            protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
-            protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
-
-            protected override void OnPaint(PaintEventArgs e)
+        // 自动尺寸：不小于 PreviewMinWidth，超限时等比收缩到最大占屏比例以内
+        // （原图模式下超大图不再铺满整屏）
+        private void AutoFitSize(int w, int h)
+        {
+            if (w <= 0) w = Config.PreviewMinWidth;
+            if (h <= 0) h = (int)(w * 0.75);
+            int minW = Config.PreviewMinWidth;
+            if (w < minW && w > 0) { h = (int)Math.Round(h * (double)minW / w); w = minW; }
+            var wa = Screen.GetWorkingArea(this);
+            double ratio = Math.Min(1, Math.Max(0.3, Config.PreviewMaxRatio));
+            int maxW = Math.Max(240, (int)(wa.Width * ratio));
+            int maxH = Math.Max(180, (int)(wa.Height * ratio));
+            if (w > maxW || h > maxH)
             {
-                var g = e.Graphics;
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                int a = _hover ? 230 : 110;
-                using (var pen = new Pen(Color.FromArgb(a, Color.White), 1.6f))
+                double k = Math.Min((double)maxW / w, (double)maxH / h);
+                w = (int)(w * k); h = (int)(h * k);
+            }
+            if (w > wa.Width - 20) w = wa.Width - 20;
+            if (h > wa.Height - 20) h = wa.Height - 20;
+            ClientSize = new Size(Math.Max(120, w), Math.Max(90, h));
+            Program.DebugLog("[pv-size] auto " + w + "x" + h + " -> " + ClientSize.Width + "x" + ClientSize.Height + " max=" + maxW + "x" + maxH);
+        }
+
+        // 视频/音频/SVG 面板：优先套用记住的尺寸，否则按内容尺寸（含工具栏 34px）并限制占屏
+        private void ApplyContentSize(int w, int h)
+        {
+            var wa = Screen.GetWorkingArea(this);
+            if (Config.PreviewMediaW > 0 && Config.PreviewMediaH > 0)
+            {
+                int rw = Math.Max(160, Math.Min(Config.PreviewMediaW, wa.Width - 20));
+                int rh = Math.Max(120, Math.Min(Config.PreviewMediaH, wa.Height - 20));
+                ClientSize = new Size(rw, rh);
+                Program.DebugLog("[pv-size] media-remembered " + rw + "x" + rh);
+                return;
+            }
+            double ratio = Math.Min(1, Math.Max(0.3, Config.PreviewMaxRatio));
+            int maxW = Math.Max(240, (int)(wa.Width * ratio));
+            int maxH = Math.Max(180, (int)(wa.Height * ratio));
+            int cw = w, ch = h + 34;
+            if (cw > maxW || ch > maxH)
+            {
+                double k = Math.Min((double)maxW / cw, (double)maxH / ch);
+                cw = (int)(cw * k); ch = (int)(ch * k);
+            }
+            if (cw > wa.Width - 20) cw = wa.Width - 20;
+            if (ch > wa.Height - 20) ch = wa.Height - 20;
+            ClientSize = new Size(Math.Max(160, cw), Math.Max(120, ch));
+            Program.DebugLog("[pv-size] media-auto " + w + "x" + h + " -> " + ClientSize.Width + "x" + ClientSize.Height);
+        }
+
+        // 记住用户调整后的尺寸（右下角手柄拖拽 / Ctrl+滚轮），延迟落盘避免频繁写配置
+        private void RememberSize(int w, int h)
+        {
+            if (_content is PictureBox)
+            {
+                Config.PreviewImgW = w;
+                Config.PreviewImgH = h;
+            }
+            else
+            {
+                Config.PreviewMediaW = w;
+                Config.PreviewMediaH = h;
+            }
+            if (_sizeSaveTimer == null)
+            {
+                _sizeSaveTimer = new Timer { Interval = 500 };
+                _sizeSaveTimer.Tick += (s, e) => { _sizeSaveTimer.Stop(); try { Config.Save(); } catch { } };
+            }
+            _sizeSaveTimer.Stop();
+            _sizeSaveTimer.Start();
+        }
+
+
+        private void HandleWheel(int delta)
+        {
+            SwitchFile(delta > 0 ? -1 : 1);
+        }
+
+        private void ZoomBy(int delta)
+        {
+            double factor = delta > 0 ? 1.15 : 0.87;
+            int newW, newH;
+            var pb = _content as PictureBox;
+            if (pb != null)
+            {
+                if (pb.Image == null) return;
+                _zoom *= factor;
+                _zoom = Math.Max(0.2, Math.Min(6, _zoom));
+                newW = (int)(pb.Image.Width * _zoom);
+                newH = (int)(pb.Image.Height * _zoom);
+            }
+            else
+            {
+                // 视频/音频/SVG 面板：按当前窗口等比缩放，画面随之变大
+                newW = (int)(ClientSize.Width * factor);
+                newH = (int)(ClientSize.Height * factor);
+            }
+            var wa = Screen.GetWorkingArea(this);
+            newW = Math.Max(120, Math.Min(wa.Width, newW));
+            newH = Math.Max(90, Math.Min(wa.Height, newH));
+            ClientSize = new Size(newW, newH);
+            RememberSize(newW, newH);
+        }
+
+        private static List<string> GetImageFiles(string dir)
+        {
+            var result = new List<string>();
+            string[] all;
+            try { all = Directory.GetFiles(dir); } catch { return result; }
+            foreach (var f in all)
+            {
+                string ext = Path.GetExtension(f);
+                if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext))
+                    result.Add(f);
+            }
+            result.Sort(StringComparer.OrdinalIgnoreCase);
+            return result;
+        }
+
+        private void SwitchFile(int dir)
+        {
+            if (string.IsNullOrEmpty(FilePath)) return;
+            string dir0 = Path.GetDirectoryName(FilePath);
+            if (string.IsNullOrEmpty(dir0)) return;
+            var imgs = GetImageFiles(dir0);
+            if (imgs.Count == 0) return;
+            int idx = imgs.FindIndex(f => string.Equals(f, FilePath, StringComparison.OrdinalIgnoreCase));
+            if (idx < 0) idx = 0;
+            int next = idx + dir;
+            if (next < 0) next = imgs.Count - 1;
+            if (next >= imgs.Count) next = 0;
+            string newPath = imgs[next];
+            int pos = next + 1;
+            int total = imgs.Count;
+            Task.Run(() =>
+            {
+                try
                 {
-                    for (int i = 0; i < 3; i++)
+                    var result = PreviewProvider.Generate(newPath);
+                    if (result == null || result.Kind != PreviewResult.KindEnum.Image) return;
+                    BeginInvoke((MethodInvoker)delegate
                     {
-                        int o = 4 + i * 5;
-                        g.DrawLine(pen, Width - o, Height - 2, Width - 2, Height - o);
-                    }
+                        if (IsDisposed) { if (result.Image != null) result.Image.Dispose(); return; }
+                        var oldImg = _img;
+                        _img = result.Image;
+                        var pb = _content as PictureBox;
+                        if (pb == null) { result.Image.Dispose(); return; }
+                        pb.Image = result.Image;
+                        FilePath = newPath;
+                        _zoom = 1.0;
+                        pb.SizeMode = PictureBoxSizeMode.Zoom;
+                        ApplyImageSize(result.DisplayW > 0 ? result.DisplayW : result.Image.Width, result.DisplayH > 0 ? result.DisplayH : result.Image.Height);
+                        UpdateMeta(newPath, pos, total);
+                        if (oldImg != null) try { oldImg.Dispose(); } catch { }
+                        if (OnFileSwitched != null) OnFileSwitched(newPath);
+                    });
                 }
+                catch { }
+            });
+        }
+
+        private void UpdateMeta(string path, int pos, int total)
+        {
+            try
+            {
+                var fi = new FileInfo(path);
+                string name = Path.GetFileName(path);
+                string ext = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
+                string meta = ext + " · " + Config.FmtSize(fi.Length);
+                if (total > 0) meta += " · " + pos + "/" + total;
+                if (_nameLbl != null) _nameLbl.Text = name;
+                if (_metaLbl != null) _metaLbl.Text = meta;
+                UpdateToolbarBtnPos();
+            }
+            catch { }
+        }
+
+        private class WheelFilter : IMessageFilter
+        {
+            private PreviewForm _form;
+            public WheelFilter(PreviewForm f) { _form = f; }
+            public bool PreFilterMessage(ref Message m)
+            {
+                if (_form == null || _form.IsDisposed) return false;
+                if (m.Msg != 0x20A) return false;
+                bool ctrl0 = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+                bool isPic = _form._content is PictureBox;
+                // 媒体面板只在 Ctrl+滚轮（缩放窗口）时拦截，普通滚轮交还给控件
+                if (!isPic && !(ctrl0 && _form._content is Panel)) return false;
+                int x = (short)((m.LParam.ToInt64() >> 0) & 0xFFFF);
+                int y = (short)((m.LParam.ToInt64() >> 16) & 0xFFFF);
+                if (!_form.Bounds.Contains(x, y)) return false;
+                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                bool ctrl = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+                if (ctrl) _form.ZoomBy(delta);
+                else _form.HandleWheel(delta);
+                return true;
             }
         }
 
@@ -780,9 +1025,12 @@ namespace HoverExplorer
         private Point _dragStart;
         private RowLabel _dragRow;
         private RowLabel _activeDirRow;
+        private RowLabel _hlRow;
         private bool _pinned;
         private Label _pinBtn;
         private Label _rowDelBtn;
+        private SizeGripCtl _grip;
+        private Timer _gripTimer;
 
         public bool Pinned { get { return _pinned; } }
 
@@ -799,6 +1047,16 @@ namespace HoverExplorer
             BackColor = Config.BG;
             DoubleBuffered = true;
             AllowDrop = true;
+            KeyPreview = true;
+            KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    if (_searchBox != null && !string.IsNullOrEmpty(_searchBox.Text) && _searchBox.Text != I18n.T("search"))
+                    { _searchBox.Text = ""; FilterRows(""); }
+                    else Close();
+                }
+            };
             DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
             DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
             DragDrop += (s, e) =>
@@ -849,7 +1107,30 @@ namespace HoverExplorer
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
+            UpdateGripPos();
+        }
 
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x232)
+            {
+                Config.PanelWidth = ClientSize.Width;
+                Config.PanelHeight = ClientSize.Height;
+                Config.Save();
+            }
+            base.WndProc(ref m);
+        }
+
+        private void UpdateGripPos()
+        {
+            if (_grip == null || _grip.IsDisposed) return;
+            _grip.Location = new Point(ClientSize.Width - _grip.Width, ClientSize.Height - _grip.Height);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
+            base.OnFormClosed(e);
         }
 
         private static Image GetIcon(bool isDir, string ext)
@@ -890,15 +1171,18 @@ namespace HoverExplorer
             try { entries = Directory.GetFileSystemEntries(path).Select(e => Path.GetFileName(e)).ToArray(); }
             catch { return false; }
             Array.Sort(entries, StringComparer.Ordinal);
-            SortEntries(path, ref entries);
             if (entries.Length > Config.MaxItems)
                 entries = entries.Take(Config.MaxItems).ToArray();
+            try { SortEntries(path, ref entries); } catch (Exception ex) { Program.DebugLog("[panel] SortEntries fail: " + ex.Message); }
             Program.DebugLog("[panel] ShowPanel level=" + _level + " lang=" + I18n.Lang + " path=" + path + " entries=" + entries.Length);
             _path = path;
 
             SuspendLayout();
             while (Controls.Count > 0) Controls[0].Dispose();
             Controls.Clear();
+            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
+            _grip = null;
+            _hlRow = null;
             _rows.Clear();
             _sortBtns.Clear();
 
@@ -925,6 +1209,27 @@ namespace HoverExplorer
                     _sortBtns[mode] = btn;
                     sortFlow.Controls.Add(btn);
                 }
+                var pathBtn = new Label
+                {
+                    Text = "⧉",
+                    Font = new Font(Config.FontName, Config.FontSize),
+                    AutoSize = true,
+                    BackColor = Config.BG,
+                    ForeColor = Config.FG,
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 0, 4, 0),
+                    Padding = new Padding(7, 1, 7, 1),
+                };
+                pathBtn.Click += (s, e) =>
+                {
+                    try { Clipboard.SetText(_path); } catch { }
+                    var origText = pathBtn.Text;
+                    pathBtn.Text = "✓";
+                    var t = new Timer { Interval = 600 };
+                    t.Tick += (s2, e2) => { ((Timer)s2).Stop(); ((Timer)s2).Dispose(); if (!pathBtn.IsDisposed) pathBtn.Text = origText; };
+                    t.Start();
+                };
+                sortFlow.Controls.Add(pathBtn);
                 Controls.Add(sortFlow);
                 curY += 28;
 
@@ -1052,7 +1357,8 @@ namespace HoverExplorer
                     if (bw > maxW) maxW = bw;
                 }
             }
-            if (maxW > 400) maxW = 400;
+            if (Config.PanelWidth > 0 && maxW < Config.PanelWidth) maxW = Config.PanelWidth;
+            if (maxW > Math.Max(400, Config.PanelWidth)) maxW = Math.Max(400, Config.PanelWidth);
             _panelW = maxW;
 
             if (_level == 0)
@@ -1151,8 +1457,22 @@ namespace HoverExplorer
                 _rows.Add(row);
                 ry += rowHeights[i];
             }
+            if (entries.Length == 0)
+            {
+                var emptyLbl = new Label
+                {
+                    Text = I18n.T("empty"),
+                    Font = font,
+                    ForeColor = Config.PlaceholderFg,
+                    BackColor = Config.BG,
+                    AutoSize = true,
+                    Location = new Point(8, 0),
+                };
+                _listPanel.Controls.Add(emptyLbl);
+            }
             var workArea = Screen.GetWorkingArea(Cursor.Position);
             int maxH = workArea.Height - 8;
+            if (Config.PanelHeight > 0) maxH = Math.Min(Config.PanelHeight, maxH);
             int needH = curY + ry;
             if (needH > maxH)
             {
@@ -1174,6 +1494,34 @@ namespace HoverExplorer
 
             // 空白处右键 = 选项菜单（排序功能已由顶部排序按钮覆盖）
             MouseClick += (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
+
+            _grip = new SizeGripCtl { Size = new Size(16, 16), Cursor = Cursors.SizeNWSE, Visible = false };
+            _grip.MouseDown += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                NativeMethods.ReleaseCapture();
+                NativeMethods.SendMessage(Handle, 0xA1, 0x11, 0);
+            };
+            Controls.Add(_grip);
+            _grip.BringToFront();
+            UpdateGripPos();
+
+            // 只在鼠标位于面板内（或正在拖拽）时显示，避免常显手柄遮住右下角的行信息
+            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); }
+            _gripTimer = new Timer { Interval = 150 };
+            _gripTimer.Tick += (s, e) =>
+            {
+                if (_grip == null || _grip.IsDisposed) return;
+                NativeMethods.POINT pt;
+                if (!NativeMethods.GetCursorPos(out pt)) return;
+                bool inside = pt.X >= Left && pt.X < Right && pt.Y >= Top && pt.Y < Bottom;
+                bool lDown = (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0;
+                bool want = inside || (lDown && _grip.Visible);
+                if (_grip.Visible != want) _grip.Visible = want;
+            };
+            _gripTimer.Start();
+
+            if (_level == 0) FocusSearch();
             return true;
         }
 
@@ -1186,33 +1534,37 @@ namespace HoverExplorer
         {
             string mode = SortMode;
             bool desc = SortDesc;
-            var list = entries.ToList();
-            list.Sort((a, b) =>
+            int n = entries.Length;
+            var isDir = new bool[n];
+            var sizes = new long[n];
+            var times = new long[n];
+            for (int i = 0; i < n; i++)
             {
-                string fa = Path.Combine(path, a), fb = Path.Combine(path, b);
-                bool da = Directory.Exists(fa), db = Directory.Exists(fb);
-                if (da != db) return da ? -1 : 1;
+                string full = Path.Combine(path, entries[i]);
+                try
+                {
+                    isDir[i] = Directory.Exists(full);
+                    if (mode == "size" && !isDir[i] && File.Exists(full)) sizes[i] = new FileInfo(full).Length;
+                    if (mode == "date") times[i] = File.GetLastWriteTimeUtc(full).Ticks;
+                }
+                catch { }
+            }
+            var indices = new int[n];
+            for (int i = 0; i < n; i++) indices[i] = i;
+            var names = entries;
+            Array.Sort<int>(indices, (ia, ib) =>
+            {
+                if (isDir[ia] != isDir[ib]) return isDir[ia] ? -1 : 1;
                 int cmp;
-                if (mode == "size")
-                {
-                    long sa = File.Exists(fa) ? new FileInfo(fa).Length : 0;
-                    long sb = File.Exists(fb) ? new FileInfo(fb).Length : 0;
-                    cmp = sa.CompareTo(sb);
-                }
-                else if (mode == "date")
-                {
-                    long ta = File.GetLastWriteTimeUtc(fa).Ticks;
-                    long tb = File.GetLastWriteTimeUtc(fb).Ticks;
-                    cmp = ta.CompareTo(tb);
-                }
-                else
-                {
-                    cmp = string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
-                }
-                if (cmp == 0) cmp = string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+                if (mode == "size") cmp = sizes[ia].CompareTo(sizes[ib]);
+                else if (mode == "date") cmp = times[ia].CompareTo(times[ib]);
+                else cmp = string.Compare(names[ia], names[ib], StringComparison.OrdinalIgnoreCase);
+                if (cmp == 0) cmp = string.Compare(names[ia], names[ib], StringComparison.OrdinalIgnoreCase);
                 return desc ? -cmp : cmp;
             });
-            entries = list.ToArray();
+            var sorted = new string[n];
+            for (int i = 0; i < n; i++) sorted[i] = names[indices[i]];
+            entries = sorted;
         }
 
         private void ApplySortBtns()
@@ -1329,6 +1681,17 @@ namespace HoverExplorer
         public void ClearActiveDir()
         {
             if (_activeDirRow != null) { ApplySel(_activeDirRow); _activeDirRow = null; }
+        }
+
+        // 滚轮切换图片时高亮列表中当前预览的文件
+        public void HighlightPath(string path)
+        {
+            if (_hlRow != null && _hlRow.Full != path) { ApplySel(_hlRow); _hlRow = null; }
+            if (string.IsNullOrEmpty(path)) return;
+            var row = _rows.FirstOrDefault(r => string.Equals(r.Full, path, StringComparison.OrdinalIgnoreCase));
+            if (row == null || row == _hlRow) return;
+            row.BackColor = Config.BgHover;
+            _hlRow = row;
         }
 
         private void ApplySel(RowLabel row)
@@ -1486,6 +1849,7 @@ namespace HoverExplorer
                         PositionPreview(row);
                         _previewForm.FilePath = full;
                         ApplyHeader(_previewForm, full);
+                        _previewForm.OnFileSwitched = p => HighlightPath(p);
 
                         _previewForm.Show();
                         NativeMethods.POINT _spt; NativeMethods.GetCursorPos(out _spt);
@@ -1677,6 +2041,12 @@ namespace HoverExplorer
             var mi = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf(typeof(NativeMethods.MONITORINFO)) };
             NativeMethods.GetMonitorInfo(hmon, ref mi);
             int wl = mi.rcWork.Left, wt = mi.rcWork.Top, wr = mi.rcWork.Right, wb = mi.rcWork.Bottom;
+            // 记住的尺寸/原图尺寸可能大于当前显示器，先钳到工作区内
+            int maxW = wr - wl - 16, maxH = wb - wt - 16;
+            if (maxW < 120) maxW = 120;
+            if (maxH < 90) maxH = 90;
+            if (pw > maxW) { pw = maxW; _extPreviewForm.ClientSize = new Size(pw, _extPreviewForm.ClientSize.Height); }
+            if (ph > maxH) { ph = maxH; _extPreviewForm.ClientSize = new Size(_extPreviewForm.ClientSize.Width, ph); }
             if (x + pw > wr)
             {
                 x = mouse.X - pw - 20;
@@ -1708,6 +2078,12 @@ namespace HoverExplorer
             var mi = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf(typeof(NativeMethods.MONITORINFO)) };
             NativeMethods.GetMonitorInfo(hmon, ref mi);
             int wl = mi.rcWork.Left, wt = mi.rcWork.Top, wr = mi.rcWork.Right, wb = mi.rcWork.Bottom;
+            // 记住的尺寸/原图尺寸可能大于当前显示器，先钳到工作区内
+            int maxW = wr - wl - 16, maxH = wb - wt - 16;
+            if (maxW < 120) maxW = 120;
+            if (maxH < 90) maxH = 90;
+            if (pw > maxW) { pw = maxW; _previewForm.ClientSize = new Size(pw, _previewForm.ClientSize.Height); }
+            if (ph > maxH) { ph = maxH; _previewForm.ClientSize = new Size(_previewForm.ClientSize.Width, ph); }
             if (x + pw > wr)
             {
                 x = lx - pw - 8;

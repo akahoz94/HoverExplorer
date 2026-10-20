@@ -18,7 +18,54 @@ namespace HoverExplorer
         private Button _cancelBtn;
         private Label _hintLbl;
         private Label _verLbl;
+        private Label _closeBtn;
         private NumericUpDown _hoverDelayBox;
+
+        private const int TitleBarH = 32;
+
+        private static LinkLabel MakeLink(string text, int x, int y, string url)
+        {
+            var link = new LinkLabel
+            {
+                Text = text,
+                Location = new Point(x, y),
+                AutoSize = true,
+                Font = new Font(Config.FontName, 9),
+                LinkArea = new LinkArea(0, text.Length)
+            };
+            link.Click += (s, e) => OpenUrl(url);
+            return link;
+        }
+
+        private static void OpenUrl(string url)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics;
+            using (var f = new Font(Config.FontName, 10, FontStyle.Bold))
+            using (var b = new SolidBrush(Config.FG))
+                g.DrawString(I18n.T("settings"), f, b, 12, 8);
+            using (var p = new Pen(Config.Border, 1))
+                g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left && e.Y <= TitleBarH)
+            {
+                NativeMethods.ReleaseCapture();
+                NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
+            }
+        }
 
         private int _modifiers;
         private int _key;
@@ -33,18 +80,20 @@ namespace HoverExplorer
         {
             Text = I18n.T("settings");
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
+            // 系统 FixedSingle 边框会在下方/右侧画出硬边阴影线，改为无边框 + 自绘 1px 边框
+            FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             MinimizeBox = false;
             Width = 380;
-            Height = 500;
+            Height = 545;
             ShowInTaskbar = false;
+            DoubleBuffered = true;
 
             HotkeyEnabled = Config.HotkeyEnabled;
             _modifiers = Config.HotkeyModifiers;
             _key = Config.HotkeyKey;
 
-            int y = 15;
+            int y = TitleBarH + 15;
 
             var titleLbl = new Label
             {
@@ -211,6 +260,27 @@ namespace HoverExplorer
             donateLbl.Click += copyWx;
             Controls.Add(donateLbl);
 
+            // 发布页 / 网盘下载
+            var ghLink = MakeLink("GitHub Releases", linkX, linkY + 28, "https://github.com/dlsdgj/HoverExplorer/releases");
+            Controls.Add(ghLink);
+            var panLink = MakeLink("百度网盘 (pwd: hbf8)", linkX, linkY + 54, "https://pan.baidu.com/s/12rp6LTe7Y8oSErvP8wTLgA?pwd=hbf8");
+            Controls.Add(panLink);
+
+            // 自绘标题栏的关闭按钮
+            _closeBtn = new Label
+            {
+                Text = "×",
+                Size = new Size(26, 22),
+                Location = new Point(ClientSize.Width - 30, 5),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font(Config.FontName, 11),
+                Cursor = Cursors.Hand
+            };
+            _closeBtn.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
+            _closeBtn.MouseEnter += (s, e) => _closeBtn.BackColor = Config.BgHover;
+            _closeBtn.MouseLeave += (s, e) => _closeBtn.BackColor = Config.BG;
+            Controls.Add(_closeBtn);
+
             // 版本号：窗口右下角，弱化显示
             _verLbl = new Label
             {
@@ -227,6 +297,13 @@ namespace HoverExplorer
 
             ApplyThemeColors();
             UpdateEnabledState();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // 无边框 + Win11 圆角，但不加系统投影
+            Win11.ApplyRounded(Handle, Config.Theme != "light");
         }
 
         private void StartCapture()
@@ -308,6 +385,7 @@ namespace HoverExplorer
             _currentLbl.ForeColor = Config.FgDir;
             _hintLbl.ForeColor = Config.PlaceholderFg;
             if (_verLbl != null) _verLbl.ForeColor = Config.PlaceholderFg;
+            if (_closeBtn != null) { _closeBtn.ForeColor = Config.PlaceholderFg; _closeBtn.BackColor = Config.BG; }
         }
     }
 }

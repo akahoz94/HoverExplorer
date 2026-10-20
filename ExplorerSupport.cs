@@ -1,8 +1,6 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
-using System.Windows.Automation;
 
 namespace HoverExplorer
 {
@@ -12,200 +10,6 @@ namespace HoverExplorer
         private static System.Collections.Generic.List<string> _cachedTabs;
         private static DateTime _cacheTime;
 
-        private static string _lastDetectLog;
-        private static void LogDetect(string state, string detail)
-        {
-            string key = state + "|" + detail;
-            if (key == _lastDetectLog) return;
-            _lastDetectLog = key;
-            Program.DebugLog("[detect] " + state + (string.IsNullOrEmpty(detail) ? "" : " | " + detail));
-        }
-
-        private static string SafeCls(AutomationElement el)
-        {
-            try { return el.Current.ClassName; } catch { return "?"; }
-        }
-
-        private static string SafeName(AutomationElement el)
-        {
-            try { return el.Current.Name; } catch { return null; }
-        }
-
-        // Win11 详细信息视图：行内名称单元格是 Name 为"名称"的子元素（其 Value 才是文件名）
-        private static AutomationElement FindNameCell(AutomationElement item, int depth)
-        {
-            if (depth > 3) return null;
-            var walker = TreeWalker.RawViewWalker;
-            var child = walker.GetFirstChild(item);
-            while (child != null)
-            {
-                string n = SafeName(child);
-                if (n == "名称" || n == "Name") return child;
-                var sub = FindNameCell(child, depth + 1);
-                if (sub != null) return sub;
-                child = walker.GetNextSibling(child);
-            }
-            return null;
-        }
-
-        private static IntPtr _cachedHeaderHwnd;
-        private static double _cachedHeaderLeft = double.NaN, _cachedHeaderRight;
-        private static double _cachedHeaderTop, _cachedHeaderBottom;
-        private static DateTime _headerCacheTime;
-
-        // 条目是否处于详细信息视图：存在可见的"名称"表头，且紧贴条目上方并水平重叠
-        // （图标视图下窗口里也可能存在其他同名"名称"元素，但不会位于条目正上方）
-        private static bool IsDetailsView(IntPtr explorerHwnd, System.Windows.Rect itemRect)
-        {
-            if (!HasNameHeader(explorerHwnd)) return false;
-            if (explorerHwnd != _cachedHeaderHwnd || double.IsNaN(_cachedHeaderLeft)) return false;
-            if (_cachedHeaderBottom > itemRect.Y + 1) return false;   // 表头必须位于条目上方
-            if (_cachedHeaderRight <= itemRect.X || _cachedHeaderLeft >= itemRect.Right) return false; // 水平需重叠
-            return true;
-        }
-
-        // 检测是否存在列头"名称"——有列头才是详细信息视图；图标/平铺视图无列头
-        private static bool HasNameHeader(IntPtr explorerHwnd)
-        {
-            if (explorerHwnd == _cachedHeaderHwnd && !double.IsNaN(_cachedHeaderLeft)
-                && (DateTime.UtcNow - _headerCacheTime).TotalSeconds < 3)
-                return true;
-            try
-            {
-                var root = AutomationElement.FromHandle(explorerHwnd);
-                if (root == null) return false;
-                var cond = new OrCondition(
-                    new PropertyCondition(AutomationElement.NameProperty, "名称"),
-                    new PropertyCondition(AutomationElement.NameProperty, "Name"));
-                var headers = root.FindAll(TreeScope.Descendants, cond);
-                for (int i = 0; i < headers.Count; i++)
-                {
-                    try
-                    {
-                        // 图标视图下表头元素仍存在但不可见（IsOffscreen），不能算作详细信息视图
-                        if (headers[i].Current.IsOffscreen) continue;
-                        var hr = headers[i].Current.BoundingRectangle;
-                        if (hr.Width > 10 && hr.Height > 0)
-                        {
-                            _cachedHeaderHwnd = explorerHwnd;
-                            _cachedHeaderLeft = hr.X; _cachedHeaderRight = hr.Right;
-                            _cachedHeaderTop = hr.Y; _cachedHeaderBottom = hr.Bottom;
-                            _headerCacheTime = DateTime.UtcNow;
-                            return true;
-                        }
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        /// <summary>
-        /// 计算行内"名称区域"（图标+名称）：优先用行内名称子元素，
-        /// 找不到则用列头"名称"矩形裁剪整行，最后回退整行。
-        /// 高度始终取整行高度（垂直覆盖整行），只做水平裁剪。
-        /// </summary>
-        private static bool FindNameArea(IntPtr explorerHwnd, AutomationElement item,
-            System.Windows.Rect full, out double nameLeft, out double nameRight, out double nameTop, out double nameHeight)
-        {
-            nameLeft = full.X; nameRight = full.Right; nameTop = full.Y; nameHeight = full.Height;
-
-            // 1) 在 ListItem 子树中找名称单元格（Name 为"名称"），取其水平范围、整行垂直范围
-            try
-            {
-                var cell = FindNameCell(item, 0);
-                if (cell != null)
-                {
-                    var nr = cell.Current.BoundingRectangle;
-                    if (nr.Width > 0 && nr.Height > 0 && nr.Right <= full.Right + 2 && nr.Left >= full.X - 2)
-                    {
-                        // 仅详细信息视图（有列头）才用名称列裁剪；图标/平铺视图用整行 full
-                        if (!HasNameHeader(explorerHwnd)) return false;
-                        nameLeft = nr.Left;
-                        nameRight = nr.Right;
-                        nameTop = full.Y;
-                        nameHeight = full.Height;
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            // 2) 用列头"名称"矩形裁剪整行（结果缓存 3 秒）
-            try
-            {
-                double colLeft = double.NaN, colRight = 0;
-                if (explorerHwnd == _cachedHeaderHwnd && !double.IsNaN(_cachedHeaderLeft)
-                    && (DateTime.UtcNow - _headerCacheTime).TotalSeconds < 3)
-                {
-                    colLeft = _cachedHeaderLeft; colRight = _cachedHeaderRight;
-                }
-                else
-                {
-                    var root = AutomationElement.FromHandle(explorerHwnd);
-                    if (root != null)
-                    {
-                        var cond = new PropertyCondition(AutomationElement.NameProperty, "名称");
-                        var headers = root.FindAll(TreeScope.Descendants, cond);
-                        AutomationElement best = null;
-                        double bestTop = double.MaxValue;
-                        for (int i = 0; i < headers.Count; i++)
-                        {
-                            var h = headers[i];
-                            try
-                            {
-                                if (h.Current.IsOffscreen) continue;
-                                var hr = h.Current.BoundingRectangle;
-                                if (hr.Width <= 10 || hr.Height <= 0) continue;
-                                if (hr.Top < bestTop) { bestTop = hr.Top; best = h; }
-                            }
-                            catch { }
-                        }
-                        if (best == null)
-                        {
-                            var cond2 = new PropertyCondition(AutomationElement.NameProperty, "Name");
-                            headers = root.FindAll(TreeScope.Descendants, cond2);
-                            for (int i = 0; i < headers.Count; i++)
-                            {
-                                var h = headers[i];
-                                try
-                                {
-                                    if (h.Current.IsOffscreen) continue;
-                                    var hr = h.Current.BoundingRectangle;
-                                    if (hr.Width <= 10 || hr.Height <= 0) continue;
-                                    if (hr.Top < bestTop) { bestTop = hr.Top; best = h; }
-                                }
-                                catch { }
-                            }
-                        }
-                        if (best != null)
-                        {
-                            var col = best.Current.BoundingRectangle;
-                            colLeft = col.X; colRight = col.Right;
-                            _cachedHeaderHwnd = explorerHwnd;
-                            _cachedHeaderLeft = colLeft; _cachedHeaderRight = colRight;
-                            _headerCacheTime = DateTime.UtcNow;
-                        }
-                    }
-                }
-                if (!double.IsNaN(colLeft))
-                {
-                    double left = Math.Max(full.X, colLeft);
-                    double right = Math.Min(full.Right, colRight - 1);
-                    if (right > left + 40)
-                    {
-                        nameLeft = left; nameRight = right;
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        // 检测悬停的条目（目录或文件）；isDir 标识类型，主循环据此分流弹面板或文件预览
         public static string DetectHoverItem(int mx, int my, out System.Drawing.Rectangle rect, out bool isDir)
         {
             rect = System.Drawing.Rectangle.Empty;
@@ -222,148 +26,24 @@ namespace HoverExplorer
                 if (cls == "CabinetWClass") { explorerHwnd = cur; break; }
                 cur = NativeMethods.GetParent(cur);
             }
-            if (explorerHwnd == IntPtr.Zero) { LogDetect("no-explorer-hwnd", null); return null; }
+            if (explorerHwnd == IntPtr.Zero) return null;
 
-            var apt = new System.Windows.Point(mx, my);
-            AutomationElement item = null;
-            LogDetect("step:enter-uia", null);
-            try
+            string name = ExplorerUia.DetectHoverItemCore(mx, my, explorerHwnd, out rect);
+            if (name == null)
             {
-                // 方法1: 从鼠标点元素向上查找 ListItem/DataItem（兼容部分系统）
-                AutomationElement hitEl = AutomationElement.FromPoint(apt);
-                LogDetect("step:frompoint-done", hitEl == null ? "null" : "ok");
-                if (hitEl != null)
-                {
-                    string _hitCt = "?", _hitCls = "?";
-                    try { _hitCt = hitEl.Current.ControlType.ProgrammaticName; } catch { }
-                    try { _hitCls = hitEl.Current.ClassName; } catch { }
-                    LogDetect("frompoint-el", "ct=" + _hitCt + " cls=" + _hitCls);
-                    var walker = TreeWalker.RawViewWalker;
-                    var c = hitEl;
-                    int depth = 0;
-                    while (c != null && depth < 30)
-                    {
-                        string cls = SafeCls(c);
-                        if (cls == "CabinetWClass") break;
-                        try
-                        {
-                            var ct = c.Current.ControlType;
-                            if (ct == ControlType.ListItem || ct == ControlType.DataItem)
-                            { item = c; LogDetect("m1-hit", ct.ProgrammaticName); break; }
-                        }
-                        catch { }
-                        c = walker.GetParent(c);
-                        depth++;
-                    }
-                }
-            }
-            catch { }
-
-            // 方法2: 枚举所有 ListItem/DataItem 并命中测试（更可靠）
-            if (item == null)
-            {
-                LogDetect("step:m2-start", null);
-                try
-                {
-                    var root = AutomationElement.FromHandle(explorerHwnd);
-                    if (root != null)
-                    {
-                        var cond = new OrCondition(
-                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
-                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.DataItem));
-                        var items = root.FindAll(TreeScope.Descendants, cond);
-                        LogDetect("step:m2-found", items.Count + " items");
-                        for (int i = 0; i < items.Count; i++)
-                        {
-                            var it = items[i];
-                            try
-                            {
-                                var r = it.Current.BoundingRectangle;
-                                if (mx >= r.X && mx <= r.Right && my >= r.Y && my <= r.Bottom)
-                                { item = it; LogDetect("m2-hit", it.Current.ControlType.ProgrammaticName); break; }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                catch { }
-            }
-            if (item == null)
-            {
-                // 方法3: 导航窗格 TreeView 命中测试
                 string navPath = DetectNavPaneFolder(explorerHwnd, mx, my);
-                if (navPath != null) { LogDetect("hit-navpane", navPath); return navPath; }
-                LogDetect("no-item", "mouse=" + mx + "," + my);
+                if (navPath != null) { isDir = true; return navPath; }
                 return null;
             }
-
-            string name = SafeName(item);
-
-            System.Windows.Rect full;
-            try { full = item.Current.BoundingRectangle; }
-            catch { return null; }
-
-            // 计算名称区域（图标 + 名称文本），仅高亮该区域而非整条
-            double nameLeft, nameRight, nameTop, nameHeight;
-            FindNameArea(explorerHwnd, item, full, out nameLeft, out nameRight, out nameTop, out nameHeight);
-
-            // 用相邻行行距约束高度，避免 UIA 行矩形含内边距导致高亮框偏高
-            try
-            {
-                var walker = TreeWalker.RawViewWalker;
-                double pitch = 0;
-                var sib = walker.GetNextSibling(item);
-                if (sib != null)
-                {
-                    try { if (sib.Current.ControlType == ControlType.ListItem) pitch = sib.Current.BoundingRectangle.Y - full.Y; } catch { }
-                }
-                if (pitch <= 0)
-                {
-                    var prev = walker.GetPreviousSibling(item);
-                    if (prev != null)
-                    {
-                        try { if (prev.Current.ControlType == ControlType.ListItem) pitch = full.Y - prev.Current.BoundingRectangle.Y; } catch { }
-                    }
-                }
-                if (pitch > 0 && nameHeight > pitch) nameHeight = pitch;
-            }
-            catch { }
-
-            // 触发区域：详细信息视图限定名称列（避免悬停其他列误触发）；
-            // 图标/平铺视图（无列头）整个图标区域均可触发
-            bool detailsView = IsDetailsView(explorerHwnd, full);
-            if (!detailsView)
-            {
-                // 图标视图的 UIA/裁剪矩形宽度可能只有名称宽；图标格近似方形且高度已含图标，
-                // 以高度为准水平居中扩为整个图标区域
-                double cx = (full.X + full.Right) / 2;
-                double w = Math.Max(full.Width, full.Height);
-                nameLeft = cx - w / 2; nameRight = cx + w / 2;
-                nameTop = full.Y; nameHeight = full.Height;
-            }
-            if (detailsView && (mx < nameLeft || mx > nameRight || my < nameTop || my > nameTop + nameHeight))
-            {
-                LogDetect("rejected-region", string.Format("mouse={0},{1} nameArea=({2:F0},{3:F0})-({4:F0},{5:F0}) row=({6:F0},{7:F0})-({8:F0},{9:F0})",
-                    mx, my, nameLeft, nameTop, nameRight, nameTop + nameHeight, full.X, full.Y, full.Right, full.Bottom));
-                return null;
-            }
-
-            rect = new System.Drawing.Rectangle((int)nameLeft, (int)nameTop, (int)(nameRight - nameLeft), (int)nameHeight);
-            LogDetect("rect", string.Format("details={0} full=({1:F0},{2:F0})-({3:F0},{4:F0}) final=({5},{6})-({7},{8})",
-                detailsView, full.X, full.Y, full.Right, full.Bottom, rect.Left, rect.Top, rect.Right, rect.Bottom));
 
             string dirPath = GetExplorerPath(explorerHwnd, name);
-            if (dirPath == null) { LogDetect("no-path", "name=" + name); return null; }
+            if (dirPath == null) return null;
 
             string fullPath = Path.Combine(dirPath, name);
             isDir = Directory.Exists(fullPath);
-            LogDetect("hit", (isDir ? "DIR " : "FILE ") + fullPath);
             return fullPath;
         }
 
-        /// <summary>
-        /// 检测导航窗格中鼠标悬停的文件夹路径
-        /// </summary>
         private static string DetectNavPaneFolder(IntPtr explorerHwnd, int mx, int my)
         {
             IntPtr treeHwnd = IntPtr.Zero;
@@ -416,7 +96,6 @@ namespace HoverExplorer
 
                 if (outHt.hItem == IntPtr.Zero) return null;
 
-                // 获取 item 文本并向上构造路径
                 int itemSize = Marshal.SizeOf(typeof(NativeMethods.TVITEMW));
                 IntPtr remoteItem = NativeMethods.VirtualAllocEx(proc, IntPtr.Zero, (uint)itemSize,
                     NativeMethods.MEM_COMMIT, NativeMethods.PAGE_READWRITE);
@@ -445,7 +124,6 @@ namespace HoverExplorer
                         string parentText = GetTreeItemText(treeHwnd, proc, remoteItem, remoteText,
                             localItem, localText, itemSize, textSize, parent);
                         if (string.IsNullOrEmpty(parentText)) break;
-                        // 跳过根节点（如"此电脑"、"快速访问"）
                         if (parentText == "此电脑" || parentText == "快速访问" || parentText == "网络" ||
                             parentText == "This PC" || parentText == "Quick access" || parentText == "Network")
                             break;
@@ -456,7 +134,6 @@ namespace HoverExplorer
                     Marshal.FreeHGlobal(localItem);
                     Marshal.FreeHGlobal(localText);
 
-                    // 验证路径是否存在
                     if (Directory.Exists(path)) return path;
                     return null;
                 }
@@ -495,7 +172,6 @@ namespace HoverExplorer
         {
             var tabs = GetExplorerTabPaths(hwnd);
             if (tabs == null || tabs.Count == 0) return null;
-            // 多标签窗口：选择包含目标项的标签页路径
             if (!string.IsNullOrEmpty(itemName))
             {
                 foreach (var p in tabs)
@@ -517,7 +193,6 @@ namespace HoverExplorer
 
             try
             {
-                // 用 Shell.Application COM 取该窗口所有标签页的路径（每个标签一个条目，HWND 相同）
                 Type shellType = Type.GetTypeFromProgID("Shell.Application");
                 if (shellType != null)
                 {
@@ -562,38 +237,10 @@ namespace HoverExplorer
             }
             catch { }
 
-            // 兜底：面包屑解析（部分系统 COM 不可用时使用）
             if (_cachedTabs.Count == 0)
             {
-                try
-                {
-                    var el = AutomationElement.FromHandle(hwnd);
-                    if (el != null)
-                    {
-                        var cond = new PropertyCondition(AutomationElement.ClassNameProperty, "FileExplorerExtensions.BreadcrumbBarItemControl");
-                        var crumbs = el.FindAll(TreeScope.Descendants, cond);
-                        if (crumbs.Count > 0)
-                        {
-                            string path = null;
-                            foreach (AutomationElement crumb in crumbs)
-                            {
-                                string name = crumb.Current.Name;
-                                if (string.IsNullOrEmpty(name)) continue;
-                                try { if (crumb.Current.IsOffscreen) continue; } catch { }
-                                var match = Regex.Match(name, @"\(([A-Za-z]:)\)");
-                                if (match.Success)
-                                    path = match.Groups[1].Value + "\\";
-                                else if (path != null)
-                                {
-                                    string next = Path.Combine(path, name);
-                                    if (Directory.Exists(next)) path = next;
-                                }
-                            }
-                            if (path != null && Directory.Exists(path)) _cachedTabs.Add(path);
-                        }
-                    }
-                }
-                catch { }
+                string bp = ExplorerUia.GetBreadcrumbPath(hwnd);
+                if (bp != null) _cachedTabs.Add(bp);
             }
 
             return _cachedTabs;

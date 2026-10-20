@@ -8,10 +8,12 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
 using System.Xml;
+using WpfBmp = System.Windows.Media.Imaging;
 
 namespace HoverExplorer
 {
@@ -33,20 +35,7 @@ namespace HoverExplorer
         public static bool CanPreview(string path)
         {
             if (path == null) return false;
-            string ext = Path.GetExtension(path);
-            return Config.ImgExts.Contains(ext)
-                || Config.TextExts.Contains(ext)
-                || Config.OfficeExts.Contains(ext)
-                || Config.ZipExts.Contains(ext)
-                || Config.SevenZipExts.Contains(ext)
-                || Config.FontExts.Contains(ext)
-                || Config.ExeExts.Contains(ext)
-                || Config.IcoExts.Contains(ext)
-                || Config.LnkExts.Contains(ext)
-                || Config.EpubExts.Contains(ext)
-                || Config.VideoExts.Contains(ext)
-                || Config.SvgExts.Contains(ext)
-                || Config.AudioExts.Contains(ext);
+            return File.Exists(path);
         }
 
         public static PreviewResult Generate(string full)
@@ -64,7 +53,42 @@ namespace HoverExplorer
             if (Config.LnkExts.Contains(ext)) return GenLnk(full);
             if (Config.EpubExts.Contains(ext)) return GenEpub(full);
             if (ext == ".csv") return GenCsv(full);
-            return GenText(full);
+            if (Config.TextExts.Contains(ext)) return GenText(full);
+            return GenMeta(full);
+        }
+
+        // GDI+ 不支持的格式（webp/heic/avif 等）用 WPF/WIC 解码，零额外依赖
+        private static Bitmap LoadViaWic(string full)
+        {
+            try
+            {
+                var dec = WpfBmp.BitmapDecoder.Create(
+                    new Uri(full),
+                    WpfBmp.BitmapCreateOptions.None,
+                    WpfBmp.BitmapCacheOption.OnLoad);
+                if (dec.Frames.Count == 0) return null;
+                System.Windows.Media.Imaging.BitmapSource src = dec.Frames[0];
+                if (src.PixelWidth <= 0 || src.PixelHeight <= 0) return null;
+                if (src.Format != System.Windows.Media.PixelFormats.Bgra32)
+                {
+                    var conv = new WpfBmp.FormatConvertedBitmap();
+                    conv.BeginInit();
+                    conv.Source = src;
+                    conv.DestinationFormat = System.Windows.Media.PixelFormats.Bgra32;
+                    conv.EndInit();
+                    src = conv;
+                }
+                int w = src.PixelWidth, h = src.PixelHeight;
+                int stride = w * 4;
+                byte[] px = new byte[stride * h];
+                src.CopyPixels(px, stride, 0);
+                var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, bmp.PixelFormat);
+                Marshal.Copy(px, 0, data.Scan0, px.Length);
+                bmp.UnlockBits(data);
+                return bmp;
+            }
+            catch { return null; }
         }
 
         // ===== 图片 / 图标 / TIFF =====
@@ -79,11 +103,19 @@ namespace HoverExplorer
             }
             else
             {
-                img = Image.FromFile(full);
-                if ((ext == ".tiff" || ext == ".tif") && img.FrameDimensionsList.Length > 0)
+                try
                 {
-                    var dim = new FrameDimension(img.FrameDimensionsList[0]);
-                    img.SelectActiveFrame(dim, 0);
+                    img = Image.FromFile(full);
+                    if ((ext == ".tiff" || ext == ".tif") && img.FrameDimensionsList.Length > 0)
+                    {
+                        var dim = new FrameDimension(img.FrameDimensionsList[0]);
+                        img.SelectActiveFrame(dim, 0);
+                    }
+                }
+                catch
+                {
+                    img = LoadViaWic(full);
+                    if (img == null) throw;
                 }
             }
             int frameCount = 1;
@@ -94,7 +126,12 @@ namespace HoverExplorer
                 frameCount = img.GetFrameCount(dim);
                 isGif = img.RawFormat.Equals(ImageFormat.Gif) && frameCount > 1;
             }
-            double ratio = Math.Min((double)Config.PreviewMax / img.Width, (double)Config.PreviewMax / img.Height);
+            if (Config.PreviewOriginalSize)
+            {
+                return new PreviewResult { Kind = PreviewResult.KindEnum.Image, Image = img, IsGif = isGif, DisplayW = img.Width, DisplayH = img.Height };
+            }
+            int limit = Math.Max(Config.PreviewMax, Config.PreviewMinWidth);
+            double ratio = Math.Min((double)limit / img.Width, (double)limit / img.Height);
             if (ratio > 1) ratio = 1;
             int w = (int)(img.Width * ratio), h = (int)(img.Height * ratio);
             if (isGif)
@@ -544,6 +581,26 @@ namespace HoverExplorer
                 if (sr.ReadLine() != null) lines.Add("…");
             }
             return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = string.Join("\r\n", lines), Size = new FileInfo(full).Length };
+        }
+
+        private static PreviewResult GenMeta(string full)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                var fi = new FileInfo(full);
+                sb.AppendLine(I18n.T("file_label") + fi.Name);
+                string ext = fi.Extension;
+                sb.AppendLine(I18n.T("type_label") + (string.IsNullOrEmpty(ext) ? "-" : ext));
+                sb.AppendLine(I18n.T("size_label") + FmtSize(fi.Length));
+                sb.AppendLine(I18n.T("sort_date") + ": " + fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss"));
+                sb.AppendLine(I18n.T("origfile_label") + fi.DirectoryName);
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine(I18n.T("parse_failed") + ex.Message + ")");
+            }
+            return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
         }
 
         private static string FmtSize(long n)

@@ -201,9 +201,31 @@ namespace HoverExplorer
                 try { tick.Stop(); tick.Dispose(); } catch { }
                 try { me.Close(); } catch { }
             };
+            panel.Tag = me;   // 改名时需要拿到它 Close/重放
             me.Source = new Uri(path, UriKind.Absolute);
             me.Play();
             return panel;
+        }
+
+        // 播放中的 MediaElement 占着文件句柄，改名/移动前必须 Close，否则 File.Move 失败
+        internal static void StopMedia(WinControl root)
+        {
+            var me = root.Tag as MediaElement;
+            if (me != null) { try { me.Close(); } catch { } }
+        }
+
+        // 改名后按新路径重新播放（音频面板顶部的文件名标签一并更新）
+        internal static void PlayMedia(WinControl root, string path)
+        {
+            var me = root.Tag as MediaElement;
+            if (me == null) return;
+            foreach (WinControl c in root.Controls)
+            {
+                var lbl = c as Label;
+                if (lbl != null && lbl.Dock == DockStyle.Top) lbl.Text = Path.GetFileName(path);
+            }
+            me.Source = new Uri(path, UriKind.Absolute);
+            me.Play();
         }
 
         // ===== SVG：IE 引擎回退渲染（UI 线程，Shell 无 SVG 缩略图扩展时）=====

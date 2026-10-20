@@ -11,6 +11,184 @@ using System.Windows.Forms;
 
 namespace HoverExplorer
 {
+    // 按钮/图标提示窗口：无边框、不抢前台、不在任务栏，位置固定在鼠标指针上方
+    internal class TipForm : Form
+    {
+        private Label _lbl;
+
+        public TipForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            BackColor = Config.BG;
+            _lbl = new Label
+            {
+                AutoSize = false,
+                ForeColor = Config.FG,
+                BackColor = Config.BG,
+                Location = new Point(5, 3),
+                Font = new Font(Config.FontName, Config.FontSize),
+                UseCompatibleTextRendering = true,
+            };
+            Controls.Add(_lbl);
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000 /*WS_EX_NOACTIVATE*/ | 0x00000080 /*WS_EX_TOOLWINDOW*/;
+                return cp;
+            }
+        }
+
+        public void SetText(string t)
+        {
+            _lbl.Text = t;
+            // 不支持换行的 MeasureText，逐行量出来再加总（标题提示是“路径 + 改名说明”两行）
+            var g = CreateGraphics();
+            int w = 0, h = 0;
+            foreach (var ln in t.Split('\n'))
+            {
+                var s = TextRenderer.MeasureText(g, ln, _lbl.Font);
+                if (s.Width > w) w = s.Width;
+                h += s.Height;
+            }
+            g.Dispose();
+            _lbl.Size = new Size(w + 2, h + 1);
+            ClientSize = new Size(_lbl.Width + 10, _lbl.Height + 6);
+        }
+
+        // 指针上方 18px；上方放不下就落到指针下方，并始终留在工作区内
+        public void Follow()
+        {
+            var p = Cursor.Position;
+            var wa = Screen.FromPoint(p).WorkingArea;
+            int x = p.X - Width / 2, y = p.Y - Height - 18;
+            if (x + Width > wa.Right) x = wa.Right - Width - 2;
+            if (x < wa.Left) x = wa.Left + 2;
+            if (y < wa.Top) y = p.Y + 22;
+            if (Location.X != x || Location.Y != y) Location = new Point(x, y);
+        }
+
+        public void ShowTip() { if (!Visible) Visible = true; }
+        public void HideTip() { if (Visible) Visible = false; }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using (var pen = new Pen(Config.Border)) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        }
+    }
+
+    // 列表/预览窗口的按钮提示统一管理：受 Config.ShowTips 开关控制，位置由 TipForm 控制
+    internal static class Tips
+    {
+        private static readonly Dictionary<Control, string> _map = new Dictionary<Control, string>();
+        private static readonly Timer _timer = new Timer { Interval = 300 };
+        private static TipForm _form;
+        private static Control _cur;
+
+        static Tips()
+        {
+            _timer.Tick += (s, e) => { _timer.Stop(); if (_cur != null) ShowAt(_cur); };
+        }
+
+        public static void Set(Control c, string text)
+        {
+            if (c == null || c.IsDisposed) return;
+            if (!Config.ShowTips || string.IsNullOrEmpty(text))
+            {
+                if (_map.ContainsKey(c)) { Unbind(c); _map.Remove(c); }
+                return;
+            }
+            if (!_map.ContainsKey(c)) Bind(c);
+            _map[c] = text;
+        }
+
+        // 开关关闭 / 面板销毁时立刻摘掉全部提示，不依赖控件重建
+        public static void ApplyConfig()
+        {
+            if (Config.ShowTips) return;
+            foreach (var c in _map.Keys.ToArray()) { Unbind(c); _map.Remove(c); }
+            Hide();
+        }
+
+        private static void Bind(Control c)
+        {
+            c.MouseEnter += OnEnter;
+            c.MouseMove += OnMove;
+            c.MouseLeave += OnLeave;
+            c.MouseDown += OnDown;
+            c.Disposed += OnDisposed;
+        }
+
+        private static void Unbind(Control c)
+        {
+            c.MouseEnter -= OnEnter;
+            c.MouseMove -= OnMove;
+            c.MouseLeave -= OnLeave;
+            c.MouseDown -= OnDown;
+            c.Disposed -= OnDisposed;
+        }
+
+        private static void OnEnter(object s, EventArgs e)
+        {
+            _cur = s as Control;
+            _timer.Stop(); _timer.Start();
+        }
+
+        private static void OnMove(object s, EventArgs e)
+        {
+            if (_cur == s && _form != null && _form.Visible) _form.Follow();
+        }
+
+        private static void OnLeave(object s, EventArgs e) { if (_cur == s) Hide(); }
+
+        // 点了按钮就不再显示提示（比如点了固定按钮，提示不该一直挂着）
+        private static void OnDown(object s, EventArgs e) { if (_cur == s) Hide(); }
+
+        private static void OnDisposed(object s, EventArgs e)
+        {
+            var c = s as Control;
+            if (c == null) return;
+            _map.Remove(c);
+            if (_cur == c) Hide();
+        }
+
+        private static void ShowAt(Control c)
+        {
+            // 菜单打开期间不弹提示：提示窗口是 TopMost，会盖到菜单项上（复制按钮悬停即弹菜单）
+            if (Program.ShellMenuOpen) { _cur = null; return; }
+            string t;
+            if (!_map.TryGetValue(c, out t)) return;
+            if (_form == null) _form = new TipForm();
+            _form.SetText(t);
+            _form.Follow();
+            _form.ShowTip();
+        }
+
+        private static void Hide()
+        {
+            _timer.Stop();
+            _cur = null;
+            if (_form != null) _form.HideTip();
+        }
+
+        // 提示窗口也要参与每 Tick 提顶：面板/预览会被强制提到 TopMost 最前，否则它反而被盖住
+        public static void EnsureTopmost()
+        {
+            if (_form == null || !_form.Visible || !_form.IsHandleCreated) return;
+            NativeMethods.SetWindowPos(_form.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+        }
+    }
+
     internal class RowLabel : Label
     {
         public string Full;
@@ -123,16 +301,12 @@ namespace HoverExplorer
         // 自定义内容类型：video / audio / svg（决定用哪套尺寸记忆）
         private string _mediaKind = "svg";
         internal string MediaKind { get { return _mediaKind; } }
+        // 复制按钮悬停弹出的菜单（每次新建，留引用才能在鼠标移开后收起）
+        private ContextMenuStrip _copyMenu;
 
-        // 标题就地改名
-        private TextBox _titleEdit;
-        private ToolTip _nameTip;
-        private bool _editing;
-        private int _savedW;
         private int _toolbarH = 34;
         // 区分预览窗的“挪位置”与“改尺寸”，避免挪动时把当前尺寸写进记忆
         private Size _pvSizeMoveStart;
-        public bool Editing { get { return _editing; } }
 
         // 所在目录改名后，同步预览窗里的文件路径
         internal void RebaseFilePath(string oldPrefix, string newPrefix)
@@ -240,7 +414,7 @@ namespace HoverExplorer
             SetStyle(ControlStyles.ResizeRedraw, true);
 
             KeyPreview = true;
-            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { if (_editing) EndTitleEdit(false); else Close(); } };
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
             _wheelFilter = new WheelFilter(this);
             Application.AddMessageFilter(_wheelFilter);
             FormClosed += (s, e) =>
@@ -251,6 +425,8 @@ namespace HoverExplorer
                     _sizeSaveTimer.Stop(); _sizeSaveTimer.Dispose(); _sizeSaveTimer = null;
                     try { Config.Save(); } catch { }
                 }
+                // 预览窗关了，悬停弹出的复制菜单不能还挂在屏幕上
+                if (_copyMenu != null) { try { _copyMenu.Close(); } catch { } _copyMenu = null; }
             };
 
             _toolbar = new Panel { BackColor = Config.BG, Height = 34 };
@@ -270,6 +446,7 @@ namespace HoverExplorer
             };
             Controls.Add(_grip);
             _grip.BringToFront();
+            Tips.Set(_grip, I18n.T("tip_resize"));
 
             // 轮询光标控制手柄显隐：内容控件（WPF 播放器/滚动条）不上报鼠标事件，只能靠全局光标位置判断
             _gripTimer = new Timer { Interval = 50 };
@@ -308,16 +485,6 @@ namespace HoverExplorer
                 Cursor = Cursors.Hand,
             };
             _toolbar.Controls.Add(_nameLbl);
-            _nameTip = new ToolTip();
-            // 点击标题就地改名；用 MouseUp + 位移判断，避免拖动窗口后误触发
-            var nameDown = new Point(int.MinValue, int.MinValue);
-            _nameLbl.MouseDown += (s, e) => nameDown = e.Location;
-            _nameLbl.MouseUp += (s, e) =>
-            {
-                if (e.Button != MouseButtons.Left) return;
-                if (Math.Abs(e.Location.X - nameDown.X) > 3 || Math.Abs(e.Location.Y - nameDown.Y) > 3) return;
-                BeginTitleEdit();
-            };
 
             _metaLbl = new Label
             {
@@ -338,6 +505,7 @@ namespace HoverExplorer
                 Cursor = Cursors.Hand,
             };
             _pinBtn.Click += (s, e) => TogglePin();
+            Tips.Set(_pinBtn, I18n.T("tip_pin_panel"));
             _toolbar.Controls.Add(_pinBtn);
 
             _pinLaunchBtn = new Label
@@ -349,6 +517,7 @@ namespace HoverExplorer
                 Cursor = Cursors.Hand,
             };
             _pinLaunchBtn.Click += (s, e) => { if (!string.IsNullOrEmpty(FilePath)) { Program.TogglePin(FilePath); RefreshPinLaunchIcon(); } };
+            Tips.Set(_pinLaunchBtn, I18n.T("tip_pin_card"));
             _toolbar.Controls.Add(_pinLaunchBtn);
 
 
@@ -360,7 +529,18 @@ namespace HoverExplorer
                 Image = CopyIcon(),
                 Cursor = Cursors.Hand,
             };
-            _copyBtn.MouseEnter += (s, e) => ShowCopyMenu();
+            // 复制按钮是悬停即弹菜单，不再挂提示（提示会盖到弹出的菜单项上）
+            // 鼠标移开按钮后短延时收起：期间鼠标要是移到了菜单上就不关，否则菜单没法点
+            var copyLeave = new Timer { Interval = 200 };
+            copyLeave.Tick += (s, e) =>
+            {
+                copyLeave.Stop();
+                if (_copyMenu == null) return;
+                NativeMethods.POINT p; NativeMethods.GetCursorPos(out p);
+                if (!_copyMenu.Bounds.Contains(p.X, p.Y)) _copyMenu.Close();
+            };
+            _copyBtn.MouseEnter += (s, e) => { copyLeave.Stop(); ShowCopyMenu(); };
+            _copyBtn.MouseLeave += (s, e) => { if (_copyMenu != null) copyLeave.Start(); };
             _toolbar.Controls.Add(_copyBtn);
 
             _saveBtn = new Label
@@ -373,6 +553,7 @@ namespace HoverExplorer
                 Visible = false,
             };
             _saveBtn.Click += (s, e) => SaveClick();
+            Tips.Set(_saveBtn, I18n.T("tip_save"));
             _toolbar.Controls.Add(_saveBtn);
 
             MouseEventHandler drag = (s, e) =>
@@ -395,25 +576,6 @@ namespace HoverExplorer
                 ctl.MouseMove += (s, e) => { var c = (Control)s; var sp = c.PointToScreen(e.Location); UpdateResizeCursor(c, sp.X, sp.Y); };
                 ctl.MouseLeave += (s, e) => { ((Control)s).Cursor = null; };
             }
-            _titleEdit = new TextBox
-            {
-                Font = new Font(Config.FontName, 9f),
-                BackColor = Config.BG,
-                ForeColor = Config.FG,
-                BorderStyle = BorderStyle.FixedSingle,
-                Visible = false,
-                Location = new Point(34, 7),
-                Size = new Size(120, 20),
-            };
-            _titleEdit.KeyDown += (s, e) =>
-            {
-                if (e.KeyCode == Keys.Return) { e.SuppressKeyPress = true; EndTitleEdit(true); }
-                else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; EndTitleEdit(false); }
-            };
-            // 点别处 = 提交（与资源管理器重命名一致）
-            _titleEdit.LostFocus += (s, e) => { if (_editing) EndTitleEdit(true); };
-            _toolbar.Controls.Add(_titleEdit);
-
             BindResize(_scrollPanel);
             Resize += (s, e) => ApplyLayout();
             UpdateToolbarBtnPos();
@@ -777,7 +939,7 @@ namespace HoverExplorer
             _iconLbl.Text = iconText;
             _iconLbl.BackColor = iconColor;
             // 标题常被右侧按钮挤成省略号，悬停给出完整路径
-            if (_nameTip != null) _nameTip.SetToolTip(_nameLbl, string.IsNullOrEmpty(FilePath) ? name : FilePath);
+            Tips.Set(_nameLbl, string.IsNullOrEmpty(FilePath) ? name : FilePath);
         }
 
         private void ApplyLayout()
@@ -791,76 +953,53 @@ namespace HoverExplorer
             UpdateToolbarBtnPos();
         }
 
-        // 标题就地改名：名称过长时先扩宽窗口，仍放不下就多行显示，保证输入内容看得全
-        private void BeginTitleEdit()
+
+        // 预览内容正占着文件句柄：图片是 Image.FromFile 锁的，媒体是播放中的 MediaElement。
+        // 不释放直接 File.Move / File.Delete 必定失败，所以改名/删除前先释放，之后按原路径恢复。
+        internal void ReleaseContent()
         {
-            if (_editing || _titleEdit == null || string.IsNullOrEmpty(FilePath)) return;
-            string nm = Path.GetFileName(FilePath);
-            if (string.IsNullOrEmpty(nm)) return;
-            _editing = true;
-            _savedW = ClientSize.Width;
-            _titleEdit.Text = nm;
-            _titleEdit.Multiline = false;
-            _titleEdit.ScrollBars = ScrollBars.None;
-
-            int needW;
-            using (var g = _titleEdit.CreateGraphics())
-                needW = TextRenderer.MeasureText(g, nm, _titleEdit.Font).Width + 70;  // 左侧图标 + 右侧按钮区
-            var wa = Screen.GetWorkingArea(this);
-            int maxW = Math.Max(240, (int)(wa.Width * 0.8));
-            bool multiline = needW > maxW;
-            int w = Math.Min(Math.Max(ClientSize.Width, needW), maxW);
-
-            if (multiline)
+            if (IsDisposed) return;
+            var pb = _content as PictureBox;
+            if (pb != null)
             {
-                // 超长名称：工具栏临时增高，编辑框在下方多行展开
-                _toolbarH = 34 + 46;
-                _titleEdit.Multiline = true;
-                _titleEdit.ScrollBars = ScrollBars.Vertical;
-                _titleEdit.Location = new Point(34, 30);
-                _titleEdit.Size = new Size(Math.Max(80, w - 44), 46);
+                pb.Image = null;
+                if (_img != null) { _img.Dispose(); _img = null; }
+                return;
             }
-            else
-            {
-                _titleEdit.Location = new Point(34, 7);
-                _titleEdit.Size = new Size(Math.Max(80, w - 100), 20);
-            }
-            ClientSize = new Size(w, ClientSize.Height);
-            // 扩宽后别越出屏幕右边
-            if (Left + Width > wa.Right) Left = Math.Max(wa.Left, wa.Right - Width - 4);
-            _nameLbl.Visible = false;
-            ApplyLayout();
-            _titleEdit.Visible = true;
-            _titleEdit.BringToFront();
-            _titleEdit.Focus();
-            _titleEdit.SelectAll();
-            Program.DebugLog("[pv-rename] begin " + nm + " multiline=" + multiline + " w=" + w);
+            var p = _content as Panel;
+            if (p != null) MediaPreview.StopMedia(p);
         }
 
-        private void EndTitleEdit(bool commit)
+        internal void ReloadContent()
         {
-            if (!_editing) return;
-            _editing = false;
-            string nn = commit ? _titleEdit.Text.Trim() : "";
-            bool ok = false;
-            if (commit && !string.IsNullOrEmpty(nn) &&
-                !string.Equals(nn, Path.GetFileName(FilePath), StringComparison.OrdinalIgnoreCase))
+            var pb = _content as PictureBox;
+            if (pb != null)
             {
-                string old = FilePath;
-                if (PopupForm.RenamePath(old, nn))
+                try
                 {
-                    FilePath = Path.Combine(Path.GetDirectoryName(old), nn);
-                    ok = true;
+                    var r = PreviewProvider.Generate(FilePath);
+                    if (r != null && r.Image != null) { _img = r.Image; pb.Image = r.Image; }
                 }
+                catch (Exception ex) { Program.DebugLog("[pv-reload] fail " + ex.Message); }
+                return;
             }
-            _titleEdit.Visible = false;
-            _nameLbl.Visible = true;
-            _toolbarH = 34;
-            ClientSize = new Size(_savedW, ClientSize.Height);
-            ApplyLayout();
-            if (ok) SetHeader(Path.GetFileName(FilePath), _metaLbl.Text, _iconLbl.Text, _iconLbl.BackColor);
-            Program.DebugLog("[pv-rename] end commit=" + commit + " ok=" + ok + " -> " + FilePath);
+            var p = _content as Panel;
+            if (p != null) MediaPreview.PlayMedia(p, FilePath);
         }
+
+        internal void ReleaseContentIf(string path)
+        {
+            if (string.Equals(FilePath, path, StringComparison.OrdinalIgnoreCase)) ReleaseContent();
+        }
+
+        internal void RestoreContentTo(string oldPath, string newPath)
+        {
+            if (!string.Equals(FilePath, oldPath, StringComparison.OrdinalIgnoreCase)) return;
+            FilePath = newPath;
+            ReloadContent();
+        }
+
+
 
 
         internal static bool RecycleFile(string path)
@@ -1066,7 +1205,10 @@ namespace HoverExplorer
             m.Items.Add(new ToolStripMenuItem(I18n.T("copy_file"), null, (EventHandler)((s, e) => { try { var f = new System.Collections.Specialized.StringCollection(); f.Add(FilePath); Clipboard.SetFileDropList(f); ShowToast(I18n.T("copied")); } catch { } })));
             m.Items.Add(new ToolStripMenuItem(I18n.T("copy_path"), null, (EventHandler)((s, e) => { try { Clipboard.SetText(FilePath); ShowToast(I18n.T("copied")); } catch { } })));
             Program.ShellMenuOpen = true;
-            m.Closed += (s, ev) => Program.ShellMenuOpen = false;
+            m.Closed += (s, ev) => { Program.ShellMenuOpen = false; if (_copyMenu == m) _copyMenu = null; };
+            // 鼠标移出菜单就直接收起：悬停菜单不该一直挂着
+            m.MouseLeave += (s, ev) => m.Close();
+            _copyMenu = m;
             m.Show(_copyBtn.PointToScreen(new Point(0, _copyBtn.Height + 2)));
         }
 
@@ -1188,7 +1330,6 @@ namespace HoverExplorer
         private Label _titleLbl;
         private Label _editBtn;
         private TextBox _nameEdit;
-        private ToolTip _titleTip;
         private FlowLayoutPanel _sortFlow;
         private Panel _listPanel;
         private string _path;
@@ -1297,6 +1438,9 @@ namespace HoverExplorer
         {
             base.OnResize(e);
             UpdateGripPos();
+            // 拖动右下角手柄改宽度后同步顶部与行宽度（只同步宽度，不重排行高）
+            if (Width != _panelW) SyncWidth(ClientSize.Width);
+            if (_pinBtn != null) _pinBtn.BringToFront();
         }
 
         protected override void WndProc(ref Message m)
@@ -1363,6 +1507,37 @@ namespace HoverExplorer
             return (bytes / 1024.0 / 1024.0 / 1024.0).ToString("F2") + " GB";
         }
 
+        // 顶部控件与行宽度按面板宽度同步：拖动手柄改宽后必须刷新，
+        // 否则排序行/名称行停在旧宽度、固定按钮位置不对
+        private void SyncWidth(int w)
+        {
+            if (w < 40) return;
+            _panelW = w;
+            if (_level == 0)
+            {
+                foreach (Control c in Controls)
+                {
+                    if (c is Panel && c.BackColor == Config.Border) c.Width = w - 12;
+                }
+                if (_searchBox != null) _searchBox.Width = w - 14;
+                if (_nameRow != null)
+                {
+                    _nameRow.Width = w - 12;
+                    if (_titleLbl != null) _titleLbl.Width = Math.Max(40, w - 12 - 24);
+                    if (_editBtn != null) _editBtn.Left = w - 12 - 22;
+                    if (_nameEdit != null) _nameEdit.Width = Math.Max(60, w - 12 - 24);
+                }
+                if (_sortFlow != null) _sortFlow.Width = w - 12;
+                if (_pinBtn != null) _pinBtn.Location = new Point(w - 26, 7);
+            }
+            if (_listPanel != null)
+            {
+                int sw = _listPanel.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
+                _listPanel.Width = w;
+                foreach (var r in _rows) r.Width = w - sw;
+            }
+        }
+
         public bool ShowPanel(string path, int x, int y)
         {
             CancelHover();
@@ -1406,6 +1581,7 @@ namespace HoverExplorer
                     };
                     var mode = kv.Key;
                     btn.Click += (s, e) => SetSort(mode);
+                    Tips.Set(btn, I18n.T("tip_sort"));
                     _sortBtns[mode] = btn;
                     sortFlow.Controls.Add(btn);
                 }
@@ -1429,6 +1605,7 @@ namespace HoverExplorer
                     t.Tick += (s2, e2) => { ((Timer)s2).Stop(); ((Timer)s2).Dispose(); if (!pathBtn.IsDisposed) pathBtn.Text = origText; };
                     t.Start();
                 };
+                Tips.Set(pathBtn, I18n.T("copy_path"));
                 sortFlow.Controls.Add(pathBtn);
                 Controls.Add(sortFlow);
                 curY += 28;
@@ -1442,6 +1619,7 @@ namespace HoverExplorer
                     Image = PreviewForm.PinIcon(_pinned),
                     Cursor = Cursors.Hand,
                 };
+                Tips.Set(_pinBtn, I18n.T("tip_pin_panel"));
                 _pinBtn.Click += (s, e) => TogglePinPopup();
                 Controls.Add(_pinBtn);
 
@@ -1469,9 +1647,8 @@ namespace HoverExplorer
                     if (Math.Abs(e.Location.X - titleDown.X) > 3 || Math.Abs(e.Location.Y - titleDown.Y) > 3) return;
                     BeginTitleRename();
                 };
-                if (_titleTip != null) { _titleTip.Dispose(); _titleTip = null; }
-                _titleTip = new ToolTip();
-                _titleTip.SetToolTip(_titleLbl, path);
+                // 标题提示：完整路径 + 可改名说明（统一走 Tips，受开关控制）
+                Tips.Set(_titleLbl, path + "\n" + I18n.T("tip_rename_dir"));
                 _editBtn = new Label
                 {
                     Text = "✎",
@@ -1484,6 +1661,7 @@ namespace HoverExplorer
                     Cursor = Cursors.Hand,
                     Location = new Point(_panelW - 12 - 22, 2),
                 };
+                Tips.Set(_editBtn, I18n.T("tip_rename_dir"));
                 _editBtn.Click += (s, e) => BeginTitleRename();
                 _nameEdit = new TextBox
                 {
@@ -1523,6 +1701,7 @@ namespace HoverExplorer
                 _searchBox.GotFocus += (s, e) => { if (_searchBox.Text == I18n.T("search")) { _searchBox.Text = ""; _searchBox.ForeColor = Config.FG; } };
                 _searchBox.LostFocus += (s, e) => { if (string.IsNullOrEmpty(_searchBox.Text)) { _searchBox.Text = I18n.T("search"); _searchBox.ForeColor = Config.PlaceholderFg; } };
                 _searchBox.TextChanged += (s, e) => FilterRows(_searchBox.Text);
+                Tips.Set(_searchBox, I18n.T("tip_search"));
                 _searchBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; ToggleSearch(); } };
                 _searchBorder.Controls.Add(_searchBox);
                 Controls.Add(_searchBorder);
@@ -1579,6 +1758,7 @@ namespace HoverExplorer
 
             _listPanel.Controls.Add(_rowDelBtn);
             _rowDelBtn.BringToFront();
+            Tips.Set(_rowDelBtn, I18n.T("delete"));
 
             var font = new Font(Config.FontName, Config.FontSize);
             int maxW = 200;
@@ -1628,24 +1808,7 @@ namespace HoverExplorer
             if (_pinned && _pinnedW > 0) maxW = _pinnedW;
             _panelW = maxW;
 
-            if (_level == 0)
-            {
-                foreach (Control c in Controls)
-                {
-
-                    if (c is Panel && c.BackColor == Config.Border) c.Width = _panelW - 12;
-                }
-                if (_searchBox != null) _searchBox.Width = _panelW - 14;
-                if (_nameRow != null)
-                {
-                    _nameRow.Width = _panelW - 12;
-                    if (_titleLbl != null) _titleLbl.Width = Math.Max(40, _panelW - 12 - 24);
-                    if (_editBtn != null) _editBtn.Left = _panelW - 12 - 22;
-                    if (_nameEdit != null) _nameEdit.Width = Math.Max(60, _panelW - 12 - 24);
-                }
-                if (_sortFlow != null) _sortFlow.Width = _panelW - 12;
-                if (_pinBtn != null) { _pinBtn.Location = new Point(_panelW - 26, 7); _pinBtn.BringToFront(); }
-            }
+            if (_level == 0) SyncWidth(_panelW);
 
             int rowH = 24;
             // 长文件名会自动换行显示：按换行后实际行数计算行高（封顶 3 行）；
@@ -1782,6 +1945,7 @@ namespace HoverExplorer
             Controls.Add(_grip);
             _grip.BringToFront();
             UpdateGripPos();
+            Tips.Set(_grip, I18n.T("tip_resize"));
 
             // 只在鼠标位于面板内（或正在拖拽）时显示，避免常显手柄遮住右下角的行信息
             if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); }
@@ -1863,12 +2027,20 @@ namespace HoverExplorer
             if (string.IsNullOrEmpty(dir)) return false;
             string dst = Path.Combine(dir, newName);
             if (string.Equals(src, dst, StringComparison.OrdinalIgnoreCase)) return false;
+            // 关键：文件正被预览时就占着句柄（图片 Image.FromFile 锁文件、MediaElement 播放中），
+            // 不先释放 File.Move 必定抛“文件正由另一进程使用”
+            ReleasePreviewOf(src);
+            bool moved = false;
             try
             {
                 if (Directory.Exists(src)) { if (Directory.Exists(dst)) return false; Directory.Move(src, dst); }
                 else { if (File.Exists(dst)) return false; File.Move(src, dst); }
+                moved = true;
             }
-            catch (Exception ex) { Program.Log("[重命名失败] " + ex.Message); return false; }
+            catch (Exception ex) { Program.Log("[重命名失败] " + ex.Message); }
+            // 成功按新路径恢复画面，失败也要把空掉的画面放回去
+            RestorePreviewOf(src, moved ? dst : src);
+            if (!moved) return false;
             // 固定项存的是路径，改名后要同步，否则固定卡片/面板指向失效路径
             var pi = Config.PinnedItems.Find(p => string.Equals(p.Path, src, StringComparison.OrdinalIgnoreCase));
             if (pi != null) { pi.Path = dst; Config.Save(); }
@@ -1886,6 +2058,8 @@ namespace HoverExplorer
             _nameEdit.BringToFront();
             _titleLbl.Visible = false;
             if (_editBtn != null) _editBtn.Visible = false;
+            // 同上：面板默认不抢前台，改名时要主动激活才能收到键盘
+            if (!Focused) Activate();
             _nameEdit.Focus();
             _nameEdit.SelectAll();
         }
@@ -1894,7 +2068,6 @@ namespace HoverExplorer
         {
             if (_nameEdit == null || !_nameEdit.Visible) return;
             string nn = commit ? _nameEdit.Text.Trim() : "";
-            bool ok = false;
             if (commit && !string.IsNullOrEmpty(nn))
             {
                 string old = _path;
@@ -1903,14 +2076,13 @@ namespace HoverExplorer
                 {
                     _path = target;
                     Program.RebasePaths(old, target);
-                    ok = true;
                 }
             }
             _nameEdit.Visible = false;
             _titleLbl.Visible = true;
             if (_editBtn != null) _editBtn.Visible = true;
             _titleLbl.Text = ShowName(_path);
-            if (ok && _titleTip != null) _titleTip.SetToolTip(_titleLbl, _path);
+            Tips.Set(_titleLbl, _path + "\n" + I18n.T("tip_rename_dir"));
         }
 
         // 目录改名后同步本面板路径（子面板路径以旧目录为前缀，一并改写）
@@ -1925,6 +2097,31 @@ namespace HoverExplorer
         public static void RebaseFilePreviewPath(string oldPrefix, string newPrefix)
         {
             if (_extPreviewForm != null && !_extPreviewForm.IsDisposed) _extPreviewForm.RebaseFilePath(oldPrefix, newPrefix);
+        }
+
+        // 所有改名都走这里：先把占用该文件的预览释放掉，移动完再恢复画面。
+        // 覆盖悬停预览（_extPreviewForm）与各面板内的预览。
+        internal static void ReleasePreviewOf(string path)
+        {
+            if (_extPreviewForm != null) _extPreviewForm.ReleaseContentIf(path);
+            foreach (var p in Program.Panels) p.ReleaseInnerPreviewIf(path);
+        }
+
+        internal static void RestorePreviewOf(string oldPath, string newPath)
+        {
+            if (_extPreviewForm != null) _extPreviewForm.RestoreContentTo(oldPath, newPath);
+            foreach (var p in Program.Panels) p.RestoreInnerPreview(oldPath, newPath);
+        }
+
+        // 面板内预览正显示该文件时，改名要先释放它的内容
+        internal void ReleaseInnerPreviewIf(string path)
+        {
+            if (_previewForm != null) _previewForm.ReleaseContentIf(path);
+        }
+
+        internal void RestoreInnerPreview(string oldPath, string newPath)
+        {
+            if (_previewForm != null) _previewForm.RestoreContentTo(oldPath, newPath);
         }
 
         private void SortEntries(string path, ref string[] entries)
@@ -2301,8 +2498,7 @@ namespace HoverExplorer
             if (_extPreviewTimer != null) { _extPreviewTimer.Stop(); _extPreviewTimer.Dispose(); _extPreviewTimer = null; }
             _extPreviewPath = null;
             if (_extPreviewCloseTimer != null) { _extPreviewCloseTimer.Stop(); _extPreviewCloseTimer.Dispose(); _extPreviewCloseTimer = null; }
-            // 正在就地改名时不关窗口（输入焦点在编辑框里）
-            if (_extPreviewForm != null && !_extPreviewForm.Pinned && !_extPreviewForm.Editing) { Program.DebugLog("[preview] cancel-existing-form"); CloseExtPreviewForm(); }
+            if (_extPreviewForm != null && !_extPreviewForm.Pinned) { Program.DebugLog("[preview] cancel-existing-form"); CloseExtPreviewForm(); }
         }
 
         public static bool FilePreviewContainsPoint(int x, int y)
@@ -2329,8 +2525,6 @@ namespace HoverExplorer
                 ((Timer)s).Stop(); ((Timer)s).Dispose(); _extPreviewCloseTimer = null;
                 NativeMethods.POINT pt;
                 NativeMethods.GetCursorPos(out pt);
-                // 就地改名期间挂起自动关闭，否则一输入窗口就没了
-                if (_extPreviewForm != null && _extPreviewForm.Editing) return;
                 if (_extPreviewForm != null && !_extPreviewForm.Pinned && _extPreviewForm.ContainsPoint(pt.X, pt.Y))
                     ScheduleExtPreviewClose(pt.X, pt.Y);
                 else if (_extPreviewForm != null && !_extPreviewForm.Pinned) CloseExtPreviewForm();

@@ -12,12 +12,13 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.4";
+        public const string Version = "1.0.5";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
         private static RemoteReader _reader;
         private static readonly List<PopupForm> _panels = new List<PopupForm>();
+        internal static List<PopupForm> Panels { get { return _panels; } }
         private static readonly List<PinCardForm> _pinCards = new List<PinCardForm>();
         internal static bool ShellMenuOpen;
 
@@ -208,6 +209,18 @@ namespace HoverExplorer
             tooltipItem.Checked = Config.HideTooltip;
             tooltipItem.CheckedChanged += (s, e) => { Config.HideTooltip = tooltipItem.Checked; Config.Save(); };
             trayMenu.Items.Add(tooltipItem);
+            var tipsItem = new ToolStripMenuItem(I18n.T("button_tips"));
+            tipsItem.CheckOnClick = true;
+            tipsItem.Checked = Config.ShowTips;
+            tipsItem.CheckedChanged += (s, e) =>
+            {
+                Config.ShowTips = tipsItem.Checked;
+                Config.Save();
+                Tips.ApplyConfig();
+                // 提示在控件创建时挂上，已打开的面板重建一次即可生效（预览窗下次打开生效）
+                foreach (var p in _panels) { if (!p.IsDisposed) p.RefreshPanel(); }
+            };
+            trayMenu.Items.Add(tipsItem);
             var autostartItem = new ToolStripMenuItem(I18n.T("autostart"));
             autostartItem.CheckOnClick = true;
             autostartItem.Checked = IsAutoStart();
@@ -287,6 +300,7 @@ namespace HoverExplorer
                     origItem.Text = I18n.T("preview_orig");
                     debugItem.Text = I18n.T("debug_log");
                     tooltipItem.Text = I18n.T("hide_tooltip");
+                    tipsItem.Text = I18n.T("button_tips");
                     autostartItem.Text = I18n.T("autostart");
                     hideTrayItem.Text = I18n.T("hide_tray");
 
@@ -531,6 +545,7 @@ namespace HoverExplorer
                 // 左键按住期间同样保面板置顶，否则按住拖拽时被盖住的窗口无法自愈
                 foreach (var p in _panels) p.EnsureTopmost();
                 foreach (var c in _pinCards) { if (!c.IsDisposed) PopupForm.EnsureWinTopmost(c.Handle, "pincard"); }
+                Tips.EnsureTopmost();
                 return;
             }
 
@@ -538,6 +553,8 @@ namespace HoverExplorer
             PopupForm.EnsureExtPreviewTopmost();
             // 面板同理：偶发弹出后被资源管理器窗口压住，每 Tick 重新置顶
             foreach (var p in _panels) p.EnsureTopmost();
+            // 提示窗口放在最后提顶：否则会被上面这些窗口的强制提顶压住
+            Tips.EnsureTopmost();
 
             bool inPanel = _panels.Any(p => p.ContainsPoint(mx, my));
             bool inPreview = _panels.Any(p => p.PreviewContainsPoint(mx, my));

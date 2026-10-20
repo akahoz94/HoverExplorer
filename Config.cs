@@ -66,6 +66,8 @@ namespace HoverExplorer
         public static bool PreviewFiles = true;
         public static bool DebugLog = false;
         public static bool HideTooltip = false;
+        // 列表/预览窗口的按钮提示（tooltip），可在托盘菜单关闭
+        public static bool ShowTips = true;
         public static bool HideTrayIcon = false;
         public static bool HotkeyEnabled = true;
         public static int HotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
@@ -169,6 +171,7 @@ namespace HoverExplorer
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
                         case "DebugLog": DebugLog = Convert.ToBoolean(v); break;
                         case "HideTooltip": HideTooltip = Convert.ToBoolean(v); break;
+                        case "ShowTips": ShowTips = Convert.ToBoolean(v); break;
                         case "HideTrayIcon": HideTrayIcon = Convert.ToBoolean(v); break;
                         case "HotkeyEnabled": HotkeyEnabled = Convert.ToBoolean(v); break;
                         case "HotkeyModifiers": HotkeyModifiers = Convert.ToInt32(v); break;
@@ -210,6 +213,7 @@ namespace HoverExplorer
                 data["PreviewFiles"] = PreviewFiles;
                 data["DebugLog"] = DebugLog;
                 data["HideTooltip"] = HideTooltip;
+                data["ShowTips"] = ShowTips;
                 data["HideTrayIcon"] = HideTrayIcon;
                 data["HotkeyEnabled"] = HotkeyEnabled;
                 data["HotkeyModifiers"] = HotkeyModifiers;

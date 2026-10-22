@@ -23,7 +23,7 @@ foreach ($g in $gacRefs) {
 }
 
 if (Test-Path $out) { Set-ItemProperty $out -Name IsReadOnly -Value $false }
-$srcFiles = @('Config.cs','ExplorerSupport.cs','ExplorerUia.cs','I18n.cs','MediaPreview.cs','NativeMethods.cs','PinCardForm.cs','PopupForm.cs','PreviewProvider.cs','Program.cs','RemoteReader.cs','SettingsForm.cs','ShellContextMenu.cs','Win11.cs') | ForEach-Object { "$src\$_" }
+$srcFiles = @('Config.cs','ExplorerSupport.cs','ExplorerUia.cs','I18n.cs','Ingest.cs','MediaPreview.cs','NativeMethods.cs','PinCardForm.cs','PopupForm.cs','PreviewProvider.cs','Program.cs','RemoteReader.cs','SettingsForm.cs','ShellContextMenu.cs','TcSupport.cs','Win11.cs') | ForEach-Object { "$src\$_" }
 
 & 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:winexe /out:$out /resource:"$src\donate_qr.png",HoverExplorer.donate_qr.png ($refs | ForEach-Object { "/r:$_" }) $srcFiles
 if ($LASTEXITCODE -eq 0) { Write-Output "BUILD OK" } else { Write-Output "BUILD FAIL" }

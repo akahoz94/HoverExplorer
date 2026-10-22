@@ -412,30 +412,68 @@ namespace HoverExplorer
             return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
         }
 
+        // 解析 lnk 目标路径（ApplyHeader 用）；带缓存避免悬停时重复 COM 调用
+        private static readonly Dictionary<string, string> _lnkTargetCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public static string GetLnkTarget(string full)
+        {
+            string t;
+            if (_lnkTargetCache.TryGetValue(full, out t)) return t;
+            try
+            {
+                var shellType = Type.GetTypeFromProgID("WScript.Shell");
+                var shell = Activator.CreateInstance(shellType);
+                var sc = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { full });
+                t = (string)sc.GetType().InvokeMember("TargetPath", BindingFlags.GetProperty, null, sc, null) ?? "";
+            }
+            catch { t = ""; }
+            if (_lnkTargetCache.Count > 200) _lnkTargetCache.Clear();
+            _lnkTargetCache[full] = t;
+            return t;
+        }
+
         // ===== 快捷方式 .lnk（WScript.Shell COM 反射调用，免引用 IWshRuntimeLibrary） =====
+        // 预览指向源文件的内容而非元数据：lnk 本质是指针，悬停意图是看目标内容。
+        // target 存在且是普通文件 → 递归 Generate(target) 复用全部现有预览能力；
+        // lnk→lnk 只解一层防循环；失效/无目标 → 元数据文本（排障仍可用）
         private static PreviewResult GenLnk(string full)
         {
-            var sb = new StringBuilder();
+            string target = null, args = null, workDir = null, icon = null, desc = null;
             try
             {
                 var shellType = Type.GetTypeFromProgID("WScript.Shell");
                 var shell = Activator.CreateInstance(shellType);
                 var sc = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { full });
                 var scType = sc.GetType();
-                string target = (string)scType.InvokeMember("TargetPath", BindingFlags.GetProperty, null, sc, null);
-                string args = (string)scType.InvokeMember("Arguments", BindingFlags.GetProperty, null, sc, null);
-                string workDir = (string)scType.InvokeMember("WorkingDirectory", BindingFlags.GetProperty, null, sc, null);
-                string icon = (string)scType.InvokeMember("IconLocation", BindingFlags.GetProperty, null, sc, null);
-                string desc = (string)scType.InvokeMember("Description", BindingFlags.GetProperty, null, sc, null);
-                if (!string.IsNullOrEmpty(target)) sb.AppendLine(I18n.T("target_label") + target);
-                if (!string.IsNullOrEmpty(args)) sb.AppendLine(I18n.T("args_label") + args);
-                if (!string.IsNullOrEmpty(workDir)) sb.AppendLine(I18n.T("workdir_label") + workDir);
-                if (!string.IsNullOrEmpty(icon)) sb.AppendLine(I18n.T("icon_label") + icon);
-                if (!string.IsNullOrEmpty(desc)) sb.AppendLine(I18n.T("desc_label") + desc);
-                if (!string.IsNullOrEmpty(target))
-                    sb.AppendLine(I18n.T("exists_label") + ((File.Exists(target) || Directory.Exists(target)) ? I18n.T("yes") : I18n.T("no")));
+                target = (string)scType.InvokeMember("TargetPath", BindingFlags.GetProperty, null, sc, null);
+                args = (string)scType.InvokeMember("Arguments", BindingFlags.GetProperty, null, sc, null);
+                workDir = (string)scType.InvokeMember("WorkingDirectory", BindingFlags.GetProperty, null, sc, null);
+                icon = (string)scType.InvokeMember("IconLocation", BindingFlags.GetProperty, null, sc, null);
+                desc = (string)scType.InvokeMember("Description", BindingFlags.GetProperty, null, sc, null);
             }
-            catch (Exception ex) { sb.AppendLine(I18n.T("parse_failed") + ex.Message + ")"); }
+            catch { }
+
+            // 指向源文件的预览：目标存在且是普通文件
+            bool targetIsFile = !string.IsNullOrEmpty(target) && File.Exists(target);
+            if (targetIsFile)
+            {
+                string tExt = Path.GetExtension(target).ToLowerInvariant();
+                bool targetIsLnk = Config.LnkExts.Contains(tExt);
+                if (!targetIsLnk)
+                {
+                    try { return Generate(target); }
+                    catch { }
+                }
+            }
+
+            // 降级：元数据文本（失效快捷方式 / 指向文件夹 / lnk→lnk）
+            var sb = new StringBuilder();
+            if (!string.IsNullOrEmpty(target)) sb.AppendLine(I18n.T("target_label") + target);
+            if (!string.IsNullOrEmpty(args)) sb.AppendLine(I18n.T("args_label") + args);
+            if (!string.IsNullOrEmpty(workDir)) sb.AppendLine(I18n.T("workdir_label") + workDir);
+            if (!string.IsNullOrEmpty(icon)) sb.AppendLine(I18n.T("icon_label") + icon);
+            if (!string.IsNullOrEmpty(desc)) sb.AppendLine(I18n.T("desc_label") + desc);
+            if (!string.IsNullOrEmpty(target))
+                sb.AppendLine(I18n.T("exists_label") + ((File.Exists(target) || Directory.Exists(target)) ? I18n.T("yes") : I18n.T("no")));
             return new PreviewResult { Kind = PreviewResult.KindEnum.Text, Text = sb.ToString(), Size = new FileInfo(full).Length };
         }
 

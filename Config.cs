@@ -63,6 +63,13 @@ namespace HoverExplorer
         public static int PanelWidth = 0;
         public static int PanelHeight = 0;
         public static bool ExplorerEnabled = false;
+        // Total Commander 悬停检测（TC 11.x LCL 界面，文件列表类名 "L"）。
+        // 2026-10-22 暂停：排序对齐不可靠（ini 是退出快照、临时排序错位）、HintWindow 阴影残留
+        // 未彻底解决，代码保留待后续处理。要启用：config.json 设 TcEnabled=true（排序声明用设置里的"TC 排序"）
+        public static bool TcEnabled = false;
+        // TC 排序模式声明：-1=自动(从 TC ini 推断，运行中临时改排序会错位)；0=名称↑ 1=名称↓
+        // 2=日期↑ 3=日期↓ 4=大小↑ 5=大小↓ 6=扩展名↑ 7=扩展名↓。ini 推测不准时由用户显式指定
+        public static int TcSortMode = -1;
         public static bool PreviewFiles = true;
         public static bool DebugLog = false;
         public static bool HideTooltip = false;
@@ -72,6 +79,10 @@ namespace HoverExplorer
         public static bool HotkeyEnabled = true;
         public static int HotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
         public static int HotkeyKey = 81; // Q
+        // 第二热键：剪贴板内容 → 桌面卡片
+        public static bool CardHotkeyEnabled = true;
+        public static int CardHotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
+        public static int CardHotkeyKey = 86; // V
         public static string Language = "zh";
         public static string Theme = "dark";
         public static List<PinnedItem> PinnedItems = new List<PinnedItem>();
@@ -168,6 +179,8 @@ namespace HoverExplorer
                         case "PanelHeight": PanelHeight = Convert.ToInt32(v); break;
                         case "TextPreviewLines": TextPreviewLines = Convert.ToInt32(v); break;
                         case "ExplorerEnabled": ExplorerEnabled = Convert.ToBoolean(v); break;
+                        case "TcEnabled": TcEnabled = Convert.ToBoolean(v); break;
+                        case "TcSortMode": TcSortMode = Convert.ToInt32(v); break;
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
                         case "DebugLog": DebugLog = Convert.ToBoolean(v); break;
                         case "HideTooltip": HideTooltip = Convert.ToBoolean(v); break;
@@ -183,9 +196,16 @@ namespace HoverExplorer
                             foreach (var item in (System.Collections.ArrayList)v)
                             {
                                 var d = (Dictionary<string, object>)item;
-                                PinnedItems.Add(new PinnedItem { Path = Convert.ToString(d["Path"]), X = Convert.ToInt32(d["X"]), Y = Convert.ToInt32(d["Y"]) });
+                                var pi = new PinnedItem { Path = Convert.ToString(d["Path"]), X = Convert.ToInt32(d["X"]), Y = Convert.ToInt32(d["Y"]) };
+                                if (d.ContainsKey("Kind")) pi.Kind = Convert.ToString(d["Kind"]);
+                                if (string.IsNullOrEmpty(pi.Kind)) pi.Kind = "file";
+                                if (d.ContainsKey("Title")) pi.Title = Convert.ToString(d["Title"]);
+                                PinnedItems.Add(pi);
                             }
                             break;
+                        case "CardHotkeyEnabled": CardHotkeyEnabled = Convert.ToBoolean(v); break;
+                        case "CardHotkeyModifiers": CardHotkeyModifiers = Convert.ToInt32(v); break;
+                        case "CardHotkeyKey": CardHotkeyKey = Convert.ToInt32(v); break;
                     }
                 }
                 I18n.Lang = Language;
@@ -210,6 +230,8 @@ namespace HoverExplorer
                     if (existing != null) data = existing;
                 }
                 data["ExplorerEnabled"] = ExplorerEnabled;
+                data["TcEnabled"] = TcEnabled;
+                data["TcSortMode"] = TcSortMode;
                 data["PreviewFiles"] = PreviewFiles;
                 data["DebugLog"] = DebugLog;
                 data["HideTooltip"] = HideTooltip;
@@ -218,6 +240,9 @@ namespace HoverExplorer
                 data["HotkeyEnabled"] = HotkeyEnabled;
                 data["HotkeyModifiers"] = HotkeyModifiers;
                 data["HotkeyKey"] = HotkeyKey;
+                data["CardHotkeyEnabled"] = CardHotkeyEnabled;
+                data["CardHotkeyModifiers"] = CardHotkeyModifiers;
+                data["CardHotkeyKey"] = CardHotkeyKey;
                 data["Language"] = Language;
                 data["Theme"] = Theme;
                 data["HoverDelay"] = HoverDelay;
@@ -257,7 +282,9 @@ namespace HoverExplorer
 
     internal class PinnedItem
     {
-        public string Path = "";
+        public string Kind = "file";   // file / url / text
+        public string Path = "";       // 文件路径 / URL / 文本内容
+        public string Title = "";      // 可选显示标题（url/text）
         public int X;
         public int Y;
     }

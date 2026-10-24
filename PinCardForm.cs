@@ -9,12 +9,13 @@ namespace HoverExplorer
     // 宽度恒定（名字+徽章），悬停提亮一档，sub 与操作按钮组覆盖显示在卡片右端文字上（不右扩）。
     // text 卡片：主操作=粘贴（MA_NOACTIVATE 不抢焦点 + 模拟 Ctrl+V 贴回原窗口），
     // 悬停 800ms 弹可编辑预览（复用 PreviewForm），关闭时写回内容。
-    internal class PinCardForm : Form
+    internal class PinCardForm : Form, IPaletteTarget
     {
         private readonly PinnedItem _item;
         private readonly string _path;   // = _item.Path，兼容外部按路径定位
         private readonly bool _isFile, _isUrl, _isText, _isDir;
-        private readonly Color _typeColor;   // 按类型着色的色条/徽章色
+        private Color _typeColor;   // 按类型着色的色条/徽章色（随本卡片的配色变化）
+        private int _paletteIndex;  // 本卡片自己的配色索引（滚轮切换只影响这张卡）
         private readonly bool _isToday;      // 今天修改过的文件 → 名字左侧状态点
         private string _name, _ext, _sub;
 
@@ -23,16 +24,17 @@ namespace HoverExplorer
         private Point _dragStart, _formStart;
         private bool _moved, _hover;
 
-        // 标签带配色：随主题的深/浅两版
-        private static readonly Color BgDark = Color.FromArgb(0x1b, 0x1b, 0x1f);
-        private static readonly Color BgHoverDark = Color.FromArgb(0x2e, 0x2e, 0x36);
-        private static readonly Color BgLight = Color.FromArgb(0xf4, 0xf3, 0xf7);
-        private static readonly Color BgHoverLight = Color.FromArgb(0xe4, 0xe3, 0xec);
-        private Color _bg, _bgHover, _fg, _fgSub, _fgBtn;   // 主题切换时由 ApplyTheme() 重算
-        private Color _btnHoverBg;
+        // 标签带配色：来自 CardPalettes（与面板主题 Config.Theme 无关，滚轮切换）
+        private CardPalette _pal;
+        private Color _bg, _bgHover, _fg, _fgSub;      // 由 _fnApplyPaletteColors() 按当前配色重算
+        private Color _badgeBg, _badgeFg;              // 扩展名徽章的底/字色（文件夹卡片反色）
 
         private Timer _textPreviewTimer;
         private Timer _textHoverTimer;   // 预览开着时轮询：鼠标离开卡片∪预览且未在编辑 → 关（与文件预览行为一致）
+        private Timer _badgeTimer;       // 徽章悬停计时：文件夹→弹列表 / 可预览文件→弹预览
+        private PreviewForm _filePreview; // file 卡徽章悬停弹出的内容预览
+        private Timer _fileHoverTimer;   // 该预览的轮询关闭
+        private Timer _panelWatchTimer;  // 卡片弹出的文件夹列表轮询：鼠标离开 卡片∪面板 → 收起
         private PreviewForm _textPreview;
         private bool _textDirty;
 
@@ -43,8 +45,13 @@ namespace HoverExplorer
             _isFile = item.Kind == "file";
             _isUrl = item.Kind == "url";
             _isText = item.Kind == "text";
-            _typeColor = _fnTypeColor(item);
-            _fnApplyThemeColors();
+            // 文件夹先判定：文件夹卡片整条填类型色（配色里的 folderText 作文字色）
+            _isDir = _isFile && Directory.Exists(item.Path);
+            // 每张卡片记自己的配色；-1 的新卡片沿用默认（最近一次用过的配色）
+            _paletteIndex = (item.Palette >= 0 && item.Palette < CardPalettes.All.Count)
+                ? item.Palette : Config.CardPaletteIndex;
+            _typeColor = _fnTypeColor(item, CardPalettes.Get(_paletteIndex));
+            _fnApplyPaletteColors();
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -59,7 +66,6 @@ namespace HoverExplorer
             Height = 28;
 
             // ----- 内容提取 -----
-            _isDir = _isFile && Directory.Exists(item.Path);
             long size = 0;
             _isToday = false;
             if (_isFile)
@@ -116,8 +122,8 @@ namespace HoverExplorer
                 Size = new Size(extW, 20),
                 Text = _ext,
                 Font = new Font("Microsoft YaHei", 8f, FontStyle.Bold),
-                BackColor = _typeColor,
-                ForeColor = Color.FromArgb(0x11, 0x11, 0x11),
+                BackColor = _badgeBg,
+                ForeColor = _badgeFg,
                 TextAlign = ContentAlignment.MiddleCenter,
             };
             Controls.Add(_extBadge);
@@ -139,11 +145,12 @@ namespace HoverExplorer
             Controls.Add(_subLbl);
 
             // 徽章 = 执行入口：点击徽章执行主操作（file 打开 / url 打开 / text 粘贴）。
-            // hover 提亮提示可点
+            // hover 提亮提示可点；文件夹卡悬停 400ms 弹列表（卡片下方左对齐），
+            // 可预览文件卡悬停 800ms 弹内容预览（text 卡走整卡悬停预览，不重复）
             _extBadge.Click += (s, e) => { if (_isText) _fnPaste(); else Run(); };
             _extBadge.Cursor = Cursors.Hand;
-            _extBadge.MouseEnter += (s, e) => { _extBadge.BackColor = _fnLighten(_typeColor, 0.25f); };
-            _extBadge.MouseLeave += (s, e) => { _extBadge.BackColor = _typeColor; };
+            _extBadge.MouseEnter += (s, e) => { _extBadge.BackColor = _fnLighten(_badgeBg, 0.25f); _fnScheduleBadgeAction(); };
+            _extBadge.MouseLeave += (s, e) => { _extBadge.BackColor = _badgeBg; if (_badgeTimer != null) _badgeTimer.Stop(); };
 
             // ----- 拖动 + 右键/中键 -----
             MouseEventHandler down = (s, e) =>
@@ -152,6 +159,10 @@ namespace HoverExplorer
             };
             MouseEventHandler cardMouse = (s, e) =>
             {
+                // 中键/右键前必须先放掉拖动捕获：右键弹的是 Shell 模态菜单，
+                // 若此时左键仍按下（Capture=true），模态循环会吞掉随后的 MouseUp，
+                // 窗口永久持有鼠标捕获 → 全系统单击失效
+                if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right) ReleaseStuckDrag();
                 if (e.Button == MouseButtons.Middle) Program.Unpin(_item.Kind, _item.Path);
                 else if (e.Button == MouseButtons.Right)
                 {
@@ -192,9 +203,12 @@ namespace HoverExplorer
             };
             MouseUp += (s, e) =>
             {
+                // 无条件释放捕获：只在 Left 分支释放时，一旦 MouseUp 丢失（被模态菜单、
+                // 焦点切换或窗口重排吞掉），本窗口会一直持有系统鼠标捕获，
+                // 所有点击都被路由到卡片 → 表现为整个系统单击失效，只能靠销毁窗口恢复
+                if (Capture) Capture = false;
                 if (e.Button == MouseButtons.Left)
                 {
-                    Capture = false;
                     if (_moved) Program.UpdatePinPos(_item.Kind, _item.Path, Left, Top);
                     _moved = false;
                 }
@@ -213,6 +227,10 @@ namespace HoverExplorer
                 if (_textPreviewTimer != null) { _textPreviewTimer.Stop(); _textPreviewTimer.Dispose(); _textPreviewTimer = null; }
                 if (_textHoverTimer != null) { _textHoverTimer.Stop(); _textHoverTimer.Dispose(); _textHoverTimer = null; }
                 _fnCloseTextPreview();
+                if (_badgeTimer != null) { _badgeTimer.Stop(); _badgeTimer.Dispose(); _badgeTimer = null; }
+                if (_fileHoverTimer != null) { _fileHoverTimer.Stop(); _fileHoverTimer.Dispose(); _fileHoverTimer = null; }
+                if (_panelWatchTimer != null) { _panelWatchTimer.Stop(); _panelWatchTimer.Dispose(); _panelWatchTimer = null; }
+                _fnCloseFilePreview();
             };
 
             // 文件夹卡片：接受拖入的文件/目录，复制(默认)或移动(Shift)进该文件夹
@@ -224,35 +242,68 @@ namespace HoverExplorer
             }
         }
 
-        // 主题切换时重算颜色并刷新已建控件（Program.cs themeDark/themeLight 调用）
-        public void ApplyTheme()
+        // 释放拖动捕获。除 MouseUp 正常路径外，Program 的 Tick 健康检查也会调用：
+        // 左键已物理抬起但卡片仍持有捕获时强制放掉，避免全系统单击失效
+        public void ReleaseStuckDrag()
         {
-            _fnApplyThemeColors();
-            Color bg = _hover ? _bgHover : _bg;
-            BackColor = bg;
-            _nameLbl.ForeColor = _fg;
-            _subLbl.ForeColor = _fgSub;
-            foreach (Control c in Controls)
-            {
-                if (c == _extBadge) continue;   // 徽章类型色不随主题
-                if (c is Label && c.BackColor == _btnHoverBg) c.BackColor = bg;
-                else if (c is Label && (c.BackColor == BgDark || c.BackColor == BgLight || c.BackColor == BgHoverDark || c.BackColor == BgHoverLight)) c.BackColor = bg;
-            }
-            _nameLbl.BackColor = bg;
-            _subLbl.BackColor = bg;
+            if (!Capture) { _moved = false; return; }
+            Capture = false;
+            _moved = false;
+            try { Program.DebugLog("[input] stuck capture released on card " + _path); } catch { }
+        }
 
+        // 重算颜色并刷新已建控件（新卡片沿用默认配色时调用）
+        public void ApplyPalette()
+        {
+            _fnApplyPaletteColors();
             Invalidate();
         }
 
-        private void _fnApplyThemeColors()
+        public int PaletteIndex { get { return _paletteIndex; } }
+
+        // 滚轮/列表点选：只改这一张卡片的配色，返回新索引
+        public int CyclePalette(int dir)
         {
-            bool light = Config.Theme == "light";
-            _bg = light ? BgLight : BgDark;
-            _bgHover = light ? BgHoverLight : BgHoverDark;
-            _fg = light ? Color.FromArgb(0x26, 0x26, 0x2b) : Color.White;
-            _fgSub = light ? Color.FromArgb(0x8a, 0x8a, 0x96) : Color.FromArgb(0x9a, 0x9a, 0xa6);
-            _fgBtn = light ? Color.FromArgb(0x5a, 0x5a, 0x66) : Color.FromArgb(0xbb, 0xbb, 0xc6);
-            _btnHoverBg = light ? Color.FromArgb(0xd6, 0xd5, 0xe0) : Color.FromArgb(0x3a, 0x3a, 0x44);
+            int n = CardPalettes.All.Count;
+            if (n == 0) return _paletteIndex;
+            SetPalette((( _paletteIndex + dir) % n + n) % n, true);
+            return _paletteIndex;
+        }
+
+        public void SetPalette(int index, bool persist)
+        {
+            int n = CardPalettes.All.Count;
+            if (n == 0) return;
+            index = ((index % n) + n) % n;
+            _paletteIndex = index;
+            _typeColor = _fnTypeColor(_item, CardPalettes.Get(index));
+            _fnApplyPaletteColors();
+            Invalidate();
+            _item.Palette = index;
+            // 同时作为新卡片的默认配色，下次钉的卡片沿用最近用过的这套
+            Config.CardPaletteIndex = index;
+            if (persist) Program.SaveConfigDebounced();
+        }
+
+        // 按当前配色（CardPalettes.Current）算出本卡片的实际颜色。
+        // 文件夹卡片：整条填类型色 + 配色里的 folderText 作文字色，徽章反色
+        private void _fnApplyPaletteColors()
+        {
+            _pal = CardPalettes.Get(_paletteIndex);
+            if (_pal == null) return;
+            bool fd = _isDir;
+            _bg = fd ? _typeColor : _pal.Bg;
+            _bgHover = fd ? _fnLighten(_typeColor, 0.14f) : _pal.Hover;
+            _fg = fd ? _pal.FolderText : _pal.Fg;
+            _fgSub = fd ? CardPalette.Mix(_pal.FolderText, _typeColor, 0.35) : _pal.Sub;
+            _badgeBg = fd ? _pal.FolderText : _typeColor;
+            _badgeFg = fd ? _typeColor : _pal.BadgeText;
+
+            Color bg = _hover ? _bgHover : _bg;
+            BackColor = bg;
+            if (_nameLbl != null) { _nameLbl.BackColor = bg; _nameLbl.ForeColor = _fg; }
+            if (_subLbl != null) { _subLbl.BackColor = bg; _subLbl.ForeColor = _fgSub; }
+            if (_extBadge != null) { _extBadge.BackColor = _badgeBg; _extBadge.ForeColor = _badgeFg; }
         }
 
         private static Color _fnLighten(Color c, float k)
@@ -420,6 +471,137 @@ namespace HoverExplorer
             _textPreview = null;
         }
 
+        // 徽章悬停动作调度：文件夹 400ms 弹列表；可预览文件 800ms 弹预览
+        private void _fnScheduleBadgeAction()
+        {
+            if (_badgeTimer == null)
+            {
+                _badgeTimer = new Timer();
+                _badgeTimer.Tick += (s, e) =>
+                {
+                    _badgeTimer.Stop();
+                    if (IsDisposed || !_hover) return;
+                    if (_isDir) _fnOpenFolderList();
+                    else if (_isFile && PreviewProvider.CanPreview(_path)) _fnShowFilePreview();
+                };
+            }
+            _badgeTimer.Interval = _isDir ? 400 : 800;
+            _badgeTimer.Stop();
+            _badgeTimer.Start();
+        }
+
+        // 文件夹卡：卡片下方（与卡片左对齐）弹文件夹列表；离开 卡片∪面板 后收起
+        private void _fnOpenFolderList()
+        {
+            Program.ShowCardFolderList(this, _path);
+            if (_panelWatchTimer == null)
+            {
+                int miss = 0;   // 连续两次采样（≈1s）不在 卡片∪面板 才收：从卡片移向列表跨缝隙时不误关
+                _panelWatchTimer = new Timer { Interval = 500 };
+                _panelWatchTimer.Tick += (s, e) =>
+                {
+                    if (IsDisposed) { _panelWatchTimer.Stop(); return; }
+                    if (_fnCardContainsCursor()) { miss = 0; return; }
+                    NativeMethods.POINT pt; NativeMethods.GetCursorPos(out pt);
+                    if (PopupForm.InAnyHoverPanelOrPreview(pt.X, pt.Y)) { miss = 0; return; }
+                    if (++miss < 2) return;
+                    miss = 0;
+                    _panelWatchTimer.Stop();
+                    Program.CloseHoverPanels();
+                };
+            }
+            _panelWatchTimer.Stop();
+            _panelWatchTimer.Start();
+        }
+
+        // file 卡徽章悬停：内容预览（图片/媒体/文本等走 PreviewProvider 全链路）
+        private void _fnShowFilePreview()
+        {
+            if (_filePreview != null && !_filePreview.IsDisposed) return;
+            string full = _path;
+            var ctx = System.Threading.SynchronizationContext.Current;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                PreviewResult result = null;
+                try { result = PreviewProvider.Generate(full); }
+                catch { }
+                if (result == null) return;
+                try
+                {
+                    ctx.Post(delegate
+                    {
+                        if (IsDisposed || full != _path) { if (result.Image != null) result.Image.Dispose(); return; }
+                        _fnCloseFilePreview();
+                        PreviewForm frm;
+                        if (result.Kind == PreviewResult.KindEnum.Media)
+                        {
+                            var ctl = MediaPreview.MediaPlayer(full, result.IsVideo, result.DisplayW, result.DisplayH);
+                            frm = new PreviewForm(ctl, ctl.Width, ctl.Height, result.IsVideo ? "video" : "audio");
+                        }
+                        else if (result.Kind == PreviewResult.KindEnum.SvgHtml)
+                        {
+                            var ctl = MediaPreview.SvgBrowserPanel(full);
+                            frm = new PreviewForm(ctl, ctl.Width, ctl.Height, "svg");
+                        }
+                        else if (result.Kind == PreviewResult.KindEnum.Image)
+                        {
+                            frm = result.IsGif
+                                ? new PreviewForm(result.Image, result.DisplayW, result.DisplayH)
+                                : new PreviewForm(result.Image);
+                        }
+                        else
+                        {
+                            frm = new PreviewForm(result.Text, result.Size);
+                        }
+                        _filePreview = frm;
+                        frm.FilePath = full;
+                        // 位置：卡片下方，与卡片左对齐（面板宽度超出工作区时右移钳制）
+                        int w = frm.Width, h = frm.Height;
+                        var wa = Screen.GetWorkingArea(new Rectangle(Location, Size));
+                        int px = Math.Min(Left, wa.Right - w - 8);
+                        int py = Math.Min(Bottom + 4, wa.Bottom - h - 8);
+                        frm.Location = new Point(Math.Max(px, wa.Left + 4), Math.Max(py, wa.Top + 4));
+                        frm.Show();
+                        NativeMethods.SetWindowPos(frm.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+                        if (_fileHoverTimer == null)
+                        {
+                            _fileHoverTimer = new Timer { Interval = 400 };
+                            _fileHoverTimer.Tick += (s2, e2) =>
+                            {
+                                if (_filePreview == null || _filePreview.IsDisposed) { _fileHoverTimer.Stop(); return; }
+                                if (_filePreview.Pinned) return;   // 手动拖动固定后不自动关
+                                if (_fnCardContainsCursor() || _fnFilePreviewContainsCursor()) return;
+                                _fileHoverTimer.Stop();
+                                _fnCloseFilePreview();
+                            };
+                        }
+                        _fileHoverTimer.Stop();
+                        _fileHoverTimer.Start();
+                        Program.DebugLog("[pincard] file-preview open " + full);
+                    }, null);
+                }
+                catch
+                {
+                    if (result.Image != null) { try { result.Image.Dispose(); } catch { } }
+                }
+            });
+        }
+
+        private bool _fnFilePreviewContainsCursor()
+        {
+            return _filePreview != null && !_filePreview.IsDisposed
+                && _filePreview.ClientRectangle.Contains(_filePreview.PointToClient(Cursor.Position));
+        }
+
+        private void _fnCloseFilePreview()
+        {
+            if (_fileHoverTimer != null) _fileHoverTimer.Stop();
+            if (_filePreview == null) return;
+            try { _filePreview.Close(); _filePreview.Dispose(); } catch { }
+            _filePreview = null;
+        }
+
         // 文本写回后刷新卡片显示（名字摘要/副标题）
         private void _fnRefreshTextCard()
         {
@@ -477,19 +659,38 @@ namespace HoverExplorer
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Win11.Apply(Handle, Config.Theme != "light", Config.Border);
+            // 卡片配色独立于面板主题：DWM 暗色模式按卡片底色明暗决定
+            Win11.Apply(Handle, CardPalette.Lum(_bg) < 128, Config.Border);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            var g = e.Graphics;
+            int w = Width, h = Height;
+            // 配色里的硬阴影（HTML 的 2px 2px 0）：画在卡片内缘右下，不改窗口尺寸
+            if (_pal != null && _pal.Shadow.A > 0)
+            {
+                using (var b = new SolidBrush(_pal.Shadow))
+                {
+                    g.FillRectangle(b, w - 2, 0, 2, h);
+                    g.FillRectangle(b, 0, h - 2, w, 2);
+                }
+            }
+            // 硬描边（糖果硬边 / 高对比黑白黄等配色）
+            if (_pal != null && _pal.BorderWidth > 0 && _pal.Border.A > 0)
+            {
+                int bw = _pal.BorderWidth;
+                using (var p = new Pen(_pal.Border, bw))
+                    g.DrawRectangle(p, bw / 2, bw / 2, w - bw, h - bw);
+            }
             // 左 6px 类型色条（标签带头）
             using (var b = new SolidBrush(_typeColor))
-                e.Graphics.FillRectangle(b, 0, 0, 6, Height);
+                g.FillRectangle(b, 0, 0, 6, h);
             // 今天修改过：名字左侧状态点
             if (_isToday)
                 using (var b = new SolidBrush(Color.FromArgb(0x2f, 0xb3, 0x6b)))
-                    e.Graphics.FillEllipse(b, 10, 12, 5, 5);
+                    g.FillEllipse(b, 10, 12, 5, 5);
         }
 
         private static string _fnCountSub(string dir)
@@ -502,22 +703,11 @@ namespace HoverExplorer
             catch { return ""; }
         }
 
-        // 按卡片类型 + 文件扩展名映射颜色（folder 黄/image 绿/doc 蓝/script 橙/link 紫/pdf 红/text 灰/lnk 青）
-        private static Color _fnTypeColor(PinnedItem item)
+        // 卡片类型 → 指定配色的类型色（folder 黄/image 绿/doc 蓝/script 橙/link 紫/pdf 红/text 青/lnk 粉/code 灰）
+        private static Color _fnTypeColor(PinnedItem item, CardPalette pal)
         {
-            if (item.Kind == "url") return Color.FromArgb(0x8b, 0x5c, 0xf6);
-            if (item.Kind == "text") return Color.FromArgb(0x64, 0x74, 0x8b);
-            if (Directory.Exists(item.Path)) return Color.FromArgb(0xf2, 0xa9, 0x00);
-            string ext = Path.GetExtension(item.Path).ToLowerInvariant();
-            switch (ext)
-            {
-                case ".png": case ".jpg": case ".jpeg": case ".gif": case ".bmp": case ".webp": return Color.FromArgb(0x2f, 0xae, 0x66);
-                case ".md": case ".markdown": return Color.FromArgb(0x3b, 0x82, 0xf6);
-                case ".bat": case ".cmd": case ".ps1": case ".sh": return Color.FromArgb(0xf0, 0x7f, 0x1c);
-                case ".pdf": return Color.FromArgb(0xe5, 0x48, 0x4d);
-                case ".lnk": return Color.FromArgb(0x14, 0xb8, 0xa6);
-                default: return Color.FromArgb(0x64, 0x74, 0x8b);
-            }
+            if (pal == null) return Color.FromArgb(0x64, 0x74, 0x8b);
+            return pal.TypeOf(CardPalette.TypeKeyOf(item));
         }
 
         private void Run()

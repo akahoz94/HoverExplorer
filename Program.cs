@@ -6,18 +6,20 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.7";
+        public const string Version = "1.0.8";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
         private static RemoteReader _reader;
         private static readonly List<PopupForm> _panels = new List<PopupForm>();
+        private static Mutex _singleInstance;
         internal static List<PopupForm> Panels { get { return _panels; } }
         private static readonly List<PinCardForm> _pinCards = new List<PinCardForm>();
         internal static bool ShellMenuOpen;
@@ -30,6 +32,11 @@ namespace HoverExplorer
                 if (p.IsDisposed) continue;
                 if (p.ShowingPath(dir1) || (dir2 != null && p.ShowingPath(dir2))) p.RefreshPanel();
             }
+        }
+        // 列表配色/布局等即时应用：刷新所有存活面板
+        public static void RefreshAllPanels()
+        {
+            foreach (var p in _panels) if (!p.IsDisposed) p.RefreshPanel();
         }
         // 目录改名后同步已打开面板/悬停预览里的路径，避免它们仍指向改名前的旧路径
         public static void RebasePaths(string oldPrefix, string newPrefix)
@@ -63,6 +70,7 @@ namespace HoverExplorer
         private static HotkeyWindow _hotkey;
         private static bool _hoverEnabled = true;
         private static bool _settingsOpen; // 设置窗口打开期间挂起面板自动关闭（面板可能是对话框属主）
+        internal static bool _entryArmed = true;   // 收藏·历史触发区域/卡片悬停武装位：点击行打开 Explorer 后解除，鼠标离开后恢复
 
         // 开机自启：写 HKCU Run 键，无需安装
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -108,6 +116,7 @@ namespace HoverExplorer
             }
             catch { }
         }
+
 
         private static void TruncateLogIfNeeded()
         {
@@ -167,13 +176,26 @@ namespace HoverExplorer
         }
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             AppDomain.CurrentDomain.UnhandledException += (s, e) => DebugLog("[FATAL] UnhandledException: " + e.ExceptionObject);
             Application.ThreadException += (s, e) => DebugLog("[FATAL] ThreadException: " + e.Exception);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
             Config.Load();
+
+
+            _singleInstance = new Mutex(false, @"Local\HoverExplorer.SingleInstance");
+            bool ownsMutex;
+            try { ownsMutex = _singleInstance.WaitOne(TimeSpan.FromSeconds(2)); }
+            catch (AbandonedMutexException) { ownsMutex = true; }
+            if (!ownsMutex)
+            {
+                DebugLog("[boot] duplicate instance blocked, exiting");
+                MessageBox.Show(I18n.T("already_running"), "HoverExplorer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             _desktopPath = GetDesktopPath();
             TruncateLogIfNeeded();
             LogBootInfo();
@@ -269,42 +291,27 @@ namespace HoverExplorer
             var themeDark = new ToolStripMenuItem(I18n.T("theme_dark")) { Checked = (Config.Theme == "dark") };
             var themeLight = new ToolStripMenuItem(I18n.T("theme_light")) { Checked = (Config.Theme == "light") };
             Action refreshThemeMenus = () => { themeDark.Checked = Config.Theme == "dark"; themeLight.Checked = Config.Theme == "light"; };
-            themeDark.Click += (s, e) => { Config.Theme = "dark"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyTheme(); } };
-            themeLight.Click += (s, e) => { Config.Theme = "light"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyTheme(); } };
+            themeDark.Click += (s, e) => { Config.Theme = "dark"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyPalette(); } EntryListForm.NotifyChanged(); if (_entryCardForm != null && !_entryCardForm.IsDisposed) _entryCardForm.Relayout(); };
+            themeLight.Click += (s, e) => { Config.Theme = "light"; Config.ApplyTheme(); Config.Save(); refreshThemeMenus(); PopupForm.ClearUiIconCache(); foreach (var p in _panels) p.RefreshPanel(); foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyPalette(); } EntryListForm.NotifyChanged(); if (_entryCardForm != null && !_entryCardForm.IsDisposed) _entryCardForm.Relayout(); };
             themeItem.DropDownItems.Add(themeDark);
             themeItem.DropDownItems.Add(themeLight);
 
             var settingsItem = new ToolStripMenuItem(I18n.T("settings"), null, (EventHandler)((s, e) =>
             {
+                if (_settingsOpen) return;   // 防重入（非模态：已开时忽略再次点击）
                 _settingsOpen = true;
-                try
+                var form = new SettingsForm();
+                form.FormClosed += (s2, e2) =>
                 {
-                    using (var form = new SettingsForm())
-                    {
-                        if (form.ShowDialog() == DialogResult.OK)
-                        {
-                            Config.HotkeyEnabled = form.HotkeyEnabled;
-                            Config.HotkeyModifiers = form.HotkeyModifiers;
-                            Config.HotkeyKey = form.HotkeyKey;
-                            Config.HoverDelay = form.HoverDelaySetting;
-                            Config.TcSortMode = form.TcSortSetting;
-                            Config.CardHotkeyEnabled = form.CardHotkeyEnabledSetting;
-                            Config.CardHotkeyModifiers = form.CardHotkeyModifiersSetting;
-                            Config.CardHotkeyKey = form.CardHotkeyKeySetting;
-                            Config.Save();
-                            _hotkey.ReRegisterCard();
-                            bool ok = _hotkey.ReRegister();
-                            // 保存成功不弹窗（面板已关闭即反馈）；仅注册失败需要提示
-                            if (!ok && Config.HotkeyEnabled)
-                                MessageBox.Show(I18n.T("hotkey_reg_fail"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            refreshExitText();
-                        }
-                    }
-                }
-                finally { _settingsOpen = false; }
+                    // 设置即改即生效：改动已随事件实时写入并保存，关闭无需提交
+                    _settingsOpen = false;
+                };
+                // 非模态：设置窗开着时仍可悬停操作列表/预览（Tick 不再被 _settingsOpen 短路）
+                form.Show();
             }));
 
             var langItem = new ToolStripMenuItem(I18n.T("language"));
+            var addCardItem = new ToolStripMenuItem(I18n.T("card_from_clip"), null, (EventHandler)((s, e) => AddCardFromClipboard()));
             for (int i = 0; i < I18n.LangCodes.Length; i++)
             {
                 var code = I18n.LangCodes[i];
@@ -333,6 +340,9 @@ namespace HoverExplorer
                     themeLight.Text = I18n.T("theme_light");
                     settingsItem.Text = I18n.T("settings");
                     restartItem.Text = I18n.T("restart");
+                    addCardItem.Text = I18n.T("card_from_clip");
+                    EntryListForm.NotifyChanged();   // 开着的收藏·历史列表文本/按钮提示换语言
+                    if (_entryCardForm != null && !_entryCardForm.IsDisposed) _entryCardForm.Relayout();   // 重测宽度（长语言自适应）+ 重绘换语言
                     refreshExitText();
                 };
                 langItem.DropDownItems.Add(sub);
@@ -340,7 +350,6 @@ namespace HoverExplorer
             trayMenu.Items.Add(langItem);
             trayMenu.Items.Add(themeItem);
 
-            var addCardItem = new ToolStripMenuItem(I18n.T("card_from_clip"), null, (EventHandler)((s, e) => AddCardFromClipboard()));
             trayMenu.Items.Add(addCardItem);
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(new ToolStripSeparator());
@@ -368,6 +377,7 @@ namespace HoverExplorer
                 DebugLog("[hotkey] hover " + (_hoverEnabled ? "enabled" : "disabled"));
             };
             _hotkey.CardHotkeyPressed += () => AddCardFromClipboard();
+            _hotkey.EntryHotkeyPressed += () => ShowEntryList(Cursor.Position.X, Cursor.Position.Y, true);
 
             PopupForm.OnSortChange = () =>
             {
@@ -380,7 +390,8 @@ namespace HoverExplorer
 
             foreach (var item in Config.PinnedItems)
             {
-                if (item.Kind == "file" && !File.Exists(item.Path)) continue;
+                // 文件夹卡片 Kind 也是 file：路径存在性要同时认文件与目录（只查 File.Exists 会丢文件夹卡片）
+                if (item.Kind == "file" && !File.Exists(item.Path) && !Directory.Exists(item.Path)) continue;
                 var card = new PinCardForm(item);
                 card.Tag = item;
                 _pinCards.Add(card);
@@ -394,9 +405,114 @@ namespace HoverExplorer
                 if (_trayHicon != IntPtr.Zero) { try { NativeMethods.DestroyIcon(_trayHicon); } catch { } _trayHicon = IntPtr.Zero; }
                 if (_hotkey != null) _hotkey.Unregister();
                 if (_reader != null) _reader.Dispose();
+                if (_entryIndicator != null) { try { _entryIndicator.Dispose(); } catch { } _entryIndicator = null; }
+                if (_singleInstance != null) { try { _singleInstance.ReleaseMutex(); _singleInstance.Close(); } catch { } }
             };
 
+            // 卡片上的滚轮：卡片是未激活窗口，WM_MOUSEWHEEL 只会发给前台窗口，
+            // 故用全局消息过滤按指针位置命中卡片（与 PreviewForm 的滚轮缩放同一套路）
+            Application.AddMessageFilter(new CardWheelFilter());
+            // 悬停面板顶部操作栏上的滚轮：在已保存的列表配色方案间切换（同样是非激活窗口，走全局过滤）
+            Application.AddMessageFilter(new ListWheelFilter());
+
+            // 已设置的触发区域：启动即显示桌面色块指示
+            UpdateEntryIndicator();
+
             Application.Run();
+        }
+
+        // 滚轮在某张卡片上 → 只切换这张卡片的配色，并弹出（实时更新的）配色列表
+        private class CardWheelFilter : IMessageFilter
+        {
+            private const int WM_MOUSEWHEEL = 0x20A;
+            public bool PreFilterMessage(ref Message m)
+            {
+                if (m.Msg != WM_MOUSEWHEEL) return false;
+                long lp = m.LParam.ToInt64();
+                int x = (short)(lp & 0xFFFF);
+                int y = (short)((lp >> 16) & 0xFFFF);
+                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                int dir = delta < 0 ? 1 : -1;   // 向下滚 = 下一套，向上 = 上一套
+
+                for (int i = _pinCards.Count - 1; i >= 0; i--)
+                {
+                    var c = _pinCards[i];
+                    if (c == null || c.IsDisposed) continue;
+                    if (!c.Bounds.Contains(x, y)) continue;
+                    AdjustCardPalette(c, dir, c.Bounds);
+                    return true;                // 吃掉消息：卡片上滚动不穿透到下面的窗口
+                }
+                // 收藏·历史卡片上滚动：同一套配色体系
+                if (_entryCardForm != null && !_entryCardForm.IsDisposed && _entryCardForm.Bounds.Contains(x, y))
+                {
+                    AdjustCardPalette(_entryCardForm, dir, _entryCardForm.Bounds);
+                    return true;
+                }
+                // 列表本身上滚动：继续调刚才那张卡片（指针常会滑到列表上）
+                var list = PaletteListForm.Instance;
+                if (list != null && list.Visible && _wheelCard != null && !_wheelCard.IsDisposed
+                    && list.Bounds.Contains(x, y))
+                {
+                    AdjustCardPalette(_wheelCard, dir, _wheelCard.Bounds);
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        // 悬停面板顶部操作栏上的滚轮 → 切换已保存的列表配色方案
+        // （面板是不抢前台的未激活窗口，收不到自己的 WM_MOUSEWHEEL，只能靠全局过滤）
+        private class ListWheelFilter : IMessageFilter
+        {
+            private const int WM_MOUSEWHEEL = 0x20A;
+            public bool PreFilterMessage(ref Message m)
+            {
+                if (m.Msg != WM_MOUSEWHEEL) return false;
+                long lp = m.LParam.ToInt64();
+                int x = (short)(lp & 0xFFFF);
+                int y = (short)((lp >> 16) & 0xFFFF);
+                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                int dir = delta < 0 ? 1 : -1;   // 向下滚 = 下一套，向上 = 上一套
+                for (int i = _panels.Count - 1; i >= 0; i--)
+                {
+                    var p = _panels[i];
+                    if (p == null || p.IsDisposed) continue;
+                    if (!p.InHeader(x, y)) continue;
+                    p.CycleListPalette(dir);
+                    return true;   // 吃掉消息：操作栏上滚动不再穿透到下层窗口
+                }
+                return false;
+            }
+        }
+
+        private static IPaletteTarget _wheelCard;   // 最近一次正在滚轮调色的卡片（桌面卡/收藏·历史卡）
+
+        private static void AdjustCardPalette(IPaletteTarget card, int dir, Rectangle anchor)
+        {
+            int idx;
+            var pin = card as PinCardForm;
+            var entry = card as EntryCardForm;
+            if (pin != null) idx = pin.CyclePalette(dir);
+            else if (entry != null) idx = entry.CyclePalette(dir);
+            else return;
+            _wheelCard = card;
+            PaletteListForm.ShowFor(idx, anchor, card);
+            var pal = CardPalettes.Get(idx);
+            DebugLog("[card-palette] card=" + (pin != null ? Convert.ToString(pin.Tag) : "entry") + " -> " + idx + " " + (pal != null ? pal.Name : ""));
+        }
+
+        private static System.Windows.Forms.Timer _saveTimer;
+
+        // 写盘合并：滚轮连滚 / 连续拖卡片不会每格写一次 config.json
+        internal static void SaveConfigDebounced()
+        {
+            if (_saveTimer == null)
+            {
+                _saveTimer = new System.Windows.Forms.Timer { Interval = 400 };
+                _saveTimer.Tick += (s, e) => { _saveTimer.Stop(); Config.Save(); };
+            }
+            _saveTimer.Stop();
+            _saveTimer.Start();
         }
 
         private static void Tick()
@@ -513,7 +629,7 @@ namespace HoverExplorer
                 var c = _pinCards[i];
                 if (c.IsDisposed) { _pinCards.RemoveAt(i); continue; }
                 var pi = c.Tag as PinnedItem;
-                if (pi != null && pi.Kind == kind && pi.Path == path) { try { c.Close(); c.Dispose(); } catch { } _pinCards.RemoveAt(i); }
+                if (pi != null && pi.Kind == kind && pi.Path == path) { try { c.Close(); c.Dispose(); } catch { } _pinCards.RemoveAt(i); PaletteListForm.HideNow(); }
             }
             DebugLog("[pin] remove " + kind + " " + path);
         }
@@ -621,8 +737,27 @@ namespace HoverExplorer
             return found;
         }
 
+        // 全系统"单击失效"的根因防护：卡片拖动时用 Capture=true 接管鼠标，
+        // 若 MouseUp 被模态菜单/焦点切换/窗口重排吞掉，卡片会永久持有系统鼠标捕获，
+        // 所有点击都被路由到它（窗口本身不动，看起来就是"单击没反应"），
+        // 只有销毁该窗口（中键关闭 / Unpin）才随 DestroyWindow 自动释放。
+        // 左键已物理抬起却仍有卡片持有捕获，说明 MouseUp 丢了 → 强制释放自愈。
+        private static void ReleaseStuckCaptures()
+        {
+            if ((NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0) return;
+            for (int i = 0; i < _pinCards.Count; i++)
+            {
+                var c = _pinCards[i];
+                if (c == null || c.IsDisposed || !c.IsHandleCreated) continue;
+                if (c.Capture) c.ReleaseStuckDrag();
+            }
+        }
+
         private static void TickImpl()
         {
+            // 捕获健康检查放在所有提前 return 之前：即使菜单打开/悬停已关闭也要自愈，
+            // 否则一旦捕获残留，点击被路由到卡片，用户连操作入口都点不到
+            ReleaseStuckCaptures();
             bool menuOpen = ShellMenuOpen || IsSystemMenuOpen();
             // shell 原生菜单模态期间 WM_TIMER 照常派发（Tick 仍在跑）：
             // 此期间任何 SetWindowPos 提顶都可能把卡片/面板提到菜单上面 → 菜单被盖、点击失效。
@@ -642,12 +777,35 @@ namespace HoverExplorer
 
             if (Control.MouseButtons == MouseButtons.Left)
             {
+                // 面板行拖出进行中：冻结 CloseAll（收面板会丢 GiveFeedback 光标反馈，用户误判拖拽已结束）
+                bool dragFromPanel = _panels.Any(p => !p.IsDisposed && p.IsDragging);
+                // 拖拽会话（左键按住，含 OLE 从面板行/Explorer 拖出）：光标进入触发区 → 立即弹
+                // 收藏·历史列表接收拖放（无悬停延时；穿透色块窗收不到 OLE 消息，只能走光标判定）
+                if (Config.EntryRectW >= 20 && Config.EntryRectH >= 20
+                    && mx >= Config.EntryRectX && mx < Config.EntryRectX + Config.EntryRectW
+                    && my >= Config.EntryRectY && my < Config.EntryRectY + Config.EntryRectH
+                    && (_entryListForm == null || _entryListForm.IsDisposed))
+                {
+                    ShowEntryList(Config.EntryRectX, Config.EntryRectY + Config.EntryRectH + 4);
+                    DebugLog("[entry] drag-enter rect " + mx + "," + my);
+                }
                 bool inExtPv = PopupForm.FilePreviewContainsPoint(mx, my);
                 bool inPanelPv = _panels.Any(p => p.PreviewContainsPoint(mx, my));
-                if (!inExtPv && !inPanelPv)
+                bool inPanelBody = _panels.Any(p => p.ContainsPoint(mx, my));
+                if (!inExtPv && !inPanelPv && !dragFromPanel)
                 {
                     PopupForm.CancelFilePreview();
                     foreach (var p in _panels) p.ClosePreviewIfAny();
+                    // "离开不关闭"模式：点击面板/卡片之外 = 收起未固定面板与预览
+                    // （设置窗已改非模态：不再以 _settingsOpen 短路，鼠标离开去设置窗 = 正常离开语义）
+                    if (Config.KeepOnLeave && !inPanelBody
+                        && !_panels.Any(p => p.MenuOpen || p.ModalOpen)
+                        && !_pinCards.Any(c => !c.IsDisposed && c.IsHandleCreated && c.RectangleToScreen(c.ClientRectangle).Contains(mx, my)))
+                    {
+                        _extHoverFile = null;
+                        _hoverFolder = null;
+                        CloseAll();
+                    }
                 }
                 PopupForm.EnsureExtPreviewTopmost();
                 // 左键按住期间同样保面板置顶，否则按住拖拽时被盖住的窗口无法自愈
@@ -664,13 +822,17 @@ namespace HoverExplorer
             // 提示窗口放在最后提顶：否则会被上面这些窗口的强制提顶压住
             Tips.EnsureTopmost();
 
-            bool inPanel = _panels.Any(p => p.ContainsPoint(mx, my));
+            // 鼠标在任一桌面卡片上 = 用户仍在交互（卡片弹出的列表不该被 MaybeClose 收走）
+            bool inCard = _pinCards.Any(c => !c.IsDisposed && c.IsHandleCreated && c.RectangleToScreen(c.ClientRectangle).Contains(mx, my));
+            bool inEntryList = _entryListForm != null && !_entryListForm.IsDisposed && _entryListForm.Visible
+                && mx >= _entryListForm.Left && mx < _entryListForm.Right && my >= _entryListForm.Top && my < _entryListForm.Bottom;
+            bool inPanel = _panels.Any(p => p.ContainsPoint(mx, my)) || inCard || inEntryList;
             bool inPreview = _panels.Any(p => p.PreviewContainsPoint(mx, my));
             bool inExtPreview = PopupForm.FilePreviewContainsPoint(mx, my);
             // 面板/预览显示期间也清理 Explorer tooltip：tooltips_class32 是 TOPMOST 且弹出更晚，
             // 会压在 TopMost band 顶部盖住列表/预览；鼠标进面板后下方不再检测文件，只有这里能清
             if (Config.HideTooltip && (inPanel || inPreview || inExtPreview)) HideTooltips();
-            if (menuOpen || inPanel || _settingsOpen || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
+            if (menuOpen || inPanel || _panels.Any(p => p.MenuOpen) || _panels.Any(p => p.ModalOpen) || _panels.Any(p => p.IsDragging) || inPreview || inExtPreview)
             {
                 if (inPreview || inExtPreview) Program.DebugLog("[tick] mouse in preview, skip mx=" + mx + ",my=" + my + " inPanel=" + inPanel + " inPreview=" + inPreview + " inExtPreview=" + inExtPreview + " panels=" + _panels.Count);
                 _closeStart = DateTime.MinValue;
@@ -689,11 +851,61 @@ namespace HoverExplorer
                 return;
             }
 
+            // Alt 临时禁用悬停：按住时不检测新悬停目标（保活/置顶逻辑已跑完，已有面板自然衰减关闭）
+            if (Config.AltSuppressHover && (Control.ModifierKeys & Keys.Alt) == Keys.Alt)
+                return;
+
             string hoverPath = null;
             bool hoverIsDir = false;
             Rectangle hoverRect = Rectangle.Empty;
 
+            // 打开的资源管理器窗口/标签 → 历史列表（2.5s 节流；RecordRecent 顶部相同跳过）
+            if ((DateTime.UtcNow - _lastExplorerPathAt).TotalMilliseconds >= 2500)
+            {
+                _lastExplorerPathAt = DateTime.UtcNow;
+                try
+                {
+                    foreach (var exPath in ExplorerSupport.GetOpenExplorerPaths())
+                        EntryListForm.RecordRecent(exPath);
+                }
+                catch { }
+            }
+
+            // 触发区域（桌面上的入口矩形）：区域内悬停延时弹 收藏·历史 列表，并抑制桌面图标悬停
+            // _entryArmed：点击行打开 Explorer 后解除武装——鼠标须先离开区域再回来才会重新弹列表，
+            // 否则列表刚关（点击 Close）鼠标仍在区域内，HoverDelay 后立刻重弹，盖住刚打开的 Explorer
+            bool inEntryRect = Config.EntryRectW >= 20 && Config.EntryRectH >= 20
+                && mx >= Config.EntryRectX && mx < Config.EntryRectX + Config.EntryRectW
+                && my >= Config.EntryRectY && my < Config.EntryRectY + Config.EntryRectH;
+
             if (!menuOpen)
+            {
+                if (inEntryRect)
+                {
+                    if (_entryArmed && _entryTimer == null)
+                    {
+                        _entryTimer = new System.Windows.Forms.Timer { Interval = Math.Max(200, (int)(Config.HoverDelay * 1000)) };
+                        _entryTimer.Tick += (s, e) =>
+                        {
+                            if (_entryTimer != null) { _entryTimer.Stop(); _entryTimer.Dispose(); }
+                            _entryTimer = null;
+                            if (_entryListForm == null || _entryListForm.IsDisposed)
+                                ShowEntryList(Config.EntryRectX, Config.EntryRectY + Config.EntryRectH + 4);
+                        };
+                        _entryTimer.Start();
+                    }
+                }
+                else
+                {
+                    _entryArmed = true;   // 移出区域：重新武装
+                    if (_entryTimer != null && (_entryListForm == null || _entryListForm.IsDisposed))
+                    {
+                        _entryTimer.Stop(); _entryTimer.Dispose(); _entryTimer = null;
+                    }
+                }
+            }
+
+            if (!menuOpen && !inEntryRect)
             {
                 if (NativeMethods.PointOnDesktop(mx, my))
                 {
@@ -735,6 +947,7 @@ namespace HoverExplorer
             }
             else if (_extHoverFile != null)
             {
+                // 桌面/资源管理器直接悬停的文件预览不受"离开不关闭"影响：鼠标离开按 300ms 正常收起
                 // UIA 偶发失效（如窗口激活瞬间检测不到行）不立即关预览：宽限 300ms
                 if (_extNullSince == DateTime.MinValue) _extNullSince = DateTime.UtcNow;
                 else if ((DateTime.UtcNow - _extNullSince).TotalMilliseconds > 300)
@@ -833,6 +1046,16 @@ namespace HoverExplorer
 
         private static void MaybeClose()
         {
+            // "离开不关闭"保护范围仅限：二级+子面板 或 面板内预览（用户在列表里展开的深层内容）；
+            // 一级列表切换照常关闭；桌面/资源管理器直接悬停的文件预览（ext）始终正常关闭
+            if (Config.KeepOnLeave)
+            {
+                bool hasDeep = _panels.Any(p => !p.IsDisposed && !p.Pinned && p.Level >= 1);
+                bool hasPv = _panels.Any(p => !p.IsDisposed && p.HasInnerPreview());
+                if (hasDeep || hasPv) return;
+            }
+            // 拖拽进行中不启动关闭计时（保险：正常拖拽按着左键不会走到这，防消息时序竞态）
+            if (_panels.Any(p => !p.IsDisposed && p.IsDragging)) return;
             if (_closeStart == DateTime.MinValue) _closeStart = DateTime.UtcNow;
             else if ((DateTime.UtcNow - _closeStart).TotalSeconds >= Config.CloseDelay)
             {
@@ -874,6 +1097,7 @@ namespace HoverExplorer
                 _panels.Add(form);
                 form.Show();
                 sender.SetActiveDir(path);
+                EntryListForm.RecordRecent(path);   // 历史 MRU 记录
                 DebugLog("[cascade] 子面板已显示 level=" + (level + 1) + " at " + form.Left + "," + form.Top + " 面板总数=" + _panels.Count);
             }
             else
@@ -913,6 +1137,247 @@ namespace HoverExplorer
             MaybeTrimMemory();
         }
 
+        // 卡片徽章悬停弹出的文件夹列表：卡片侧轮询调它收起（鼠标离开 卡片∪面板 后）
+        internal static void CloseHoverPanels()
+        {
+            if (_panels.Any(p => !p.IsDisposed && !p.Pinned)) CloseAll();
+        }
+
+        // ===== 历史/收藏文件夹入口 =====
+        private static EntryListForm _entryListForm;
+        private static System.Windows.Forms.Timer _entryTimer;
+        private static EntryIndicatorForm _entryIndicator;
+        private static EntryCardForm _entryCardForm;   // 折叠后的常驻卡片
+        private static DateTime _lastExplorerPathAt;   // 前台 Explorer 路径轮询节流
+
+        // 设置面板即改即生效：统一落盘 + 桌面色块/托盘文案刷新，按需重注册热键、刷新存活面板
+        internal static void ApplySettingsLive(bool hotkeys, bool panels)
+        {
+            Config.Save();
+            UpdateEntryIndicator();
+            if (hotkeys)
+            {
+                _hotkey.ReRegisterCard();
+                _hotkey.ReRegisterEntry();
+                bool ok = _hotkey.ReRegister();
+                // 仅注册失败需要提示（成功无感）
+                if (!ok && (Config.HotkeyEnabled || Config.CardHotkeyEnabled || Config.EntryHotkeyEnabled))
+                    MessageBox.Show(I18n.T("hotkey_reg_fail"), I18n.T("settings"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            if (panels)
+            {
+                // 排序/行布局变化 → 立即应用到所有存活面板（含级联子面板）
+                foreach (var p in _panels) { if (!p.IsDisposed) p.RefreshPanel(); }
+            }
+        }
+
+        // 触发区域有效 → 桌面显示/更新穿透色块；无效（w<20）→ 移除
+        internal static void UpdateEntryIndicator()
+        {
+            UpdateEntryIndicator(new Rectangle(Config.EntryRectX, Config.EntryRectY, Config.EntryRectW, Config.EntryRectH), Config.EntryRectColor);
+        }
+
+        // 带暂存值的重载：设置面板里区域/颜色未确定前，桌面色块先按暂存值实时预览（取消时按 Config 还原）
+        internal static void UpdateEntryIndicator(Rectangle rect, int argb)
+        {
+            bool valid = rect.Width >= 20 && rect.Height >= 20;
+            if (!valid)
+            {
+                if (_entryIndicator != null)
+                {
+                    try { _entryIndicator.Close(); _entryIndicator.Dispose(); } catch { }
+                    _entryIndicator = null;
+                }
+                return;
+            }
+            if (_entryIndicator == null || _entryIndicator.IsDisposed)
+            {
+                _entryIndicator = new EntryIndicatorForm();
+                _entryIndicator.Show();
+            }
+            _entryIndicator.Apply(rect, argb);
+        }
+
+        // 弹出 收藏·历史 列表（触发区域悬停 / 全局热键 / 拖拽进入）
+        internal static void ShowEntryList(int x, int y)
+        {
+            ShowEntryList(x, y, false);
+        }
+
+        // underCursor=true（快捷键弹出）：列表水平居中于光标、主体在鼠标下方，光标压进顶部
+        // 标题带（表头 26px 拖动区）——光标在列表外会被离开判定在关闭延迟后收起
+        internal static void ShowEntryList(int x, int y, bool underCursor)
+        {
+            CloseEntryList();
+            // 面板行拖出进行中：保留源面板（保 GiveFeedback 光标反馈），只弹列表；
+            // 拖放结束后鼠标不在面板上，按正常悬停逻辑收起。无拖拽时照常清场避免叠窗
+            if (!_panels.Any(p => !p.IsDisposed && p.IsDragging)) CloseAll();
+            var f = new EntryListForm(OpenFolderInExplorer);
+            _entryListForm = f;
+            try
+            {
+                if (underCursor)
+                {
+                    x -= f.Width / 2;
+                    y -= 20;   // 落在标题带内，避开首行的 400ms 行悬停
+                }
+                var wa = Screen.GetWorkingArea(new Point(x, y));
+                if (x + f.Width > wa.Right - 8) x = wa.Right - f.Width - 8;
+                if (y + f.Height > wa.Bottom - 8) y = wa.Bottom - f.Height - 8;
+                x = Math.Max(x, wa.Left + 4);
+                y = Math.Max(y, wa.Top + 4);
+            }
+            catch { }
+            f.Location = new Point(x, y);
+            f.Show();
+            NativeMethods.SetWindowPos(f.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+            _entryArmed = true;   // 主动弹出（热键/卡片点击/区域悬停）= 新会话，恢复正常武装语义
+            DebugLog("[entry] list shown at " + x + "," + y);
+        }
+
+        internal static void CloseEntryList()
+        {
+            if (_entryTimer != null) { _entryTimer.Stop(); _entryTimer.Dispose(); _entryTimer = null; }
+            if (_entryListForm != null)
+            {
+                try { _entryListForm.Close(); _entryListForm.Dispose(); } catch { }
+                _entryListForm = null;
+            }
+        }
+
+        // 列表折叠为桌面卡片：列表关闭，卡片常驻（悬停/点击再弹列表）
+        internal static void CollapseEntryToCard(int x, int y)
+        {
+            CloseEntryList();
+            if (_entryCardForm == null || _entryCardForm.IsDisposed)
+            {
+                _entryCardForm = new EntryCardForm(x, y);
+                _entryCardForm.Show();
+                DebugLog("[entry] collapsed to card at " + x + "," + y);
+            }
+            else
+            {
+                _entryCardForm.Location = new Point(x, y);
+            }
+        }
+
+        internal static bool EntryCardContainsCursor()
+        {
+            return _entryCardForm != null && !_entryCardForm.IsDisposed && _entryCardForm.Visible
+                && _entryCardForm.RectangleToScreen(_entryCardForm.ClientRectangle).Contains(Cursor.Position);
+        }
+
+        // 入口列表行悬停：行右侧弹该文件夹的级联子列表（不记 MRU，避免悬停致列表重排跳动）
+        internal static void ShowEntrySubList(Point rowRightTop, string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            var exist = _panels.FirstOrDefault(p => !p.IsDisposed && !p.Pinned && p.Level == 0);
+            if (exist != null && exist.CurrentPath == path) return;
+            var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+            foreach (var p in nonPinned) p.ClosePanel();
+            _panels.RemoveAll(p => !p.Pinned);
+            var p2 = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
+            if (p2.ShowPanel(path, rowRightTop.X + 6, rowRightTop.Y - 4))
+            {
+                _panels.Add(p2);
+                p2.Show();
+                DebugLog("[entry] sub-list opened " + path);
+            }
+            else p2.Dispose();
+        }
+
+        // 收藏·历史列表行拖放：文件复制（默认）/移动（Shift）到目标文件夹
+        // 每文件独立后台任务（与文件列表行拖放同模式：UniqueDest 重名避让 + Beep + 刷新受影响面板）
+        internal static void DropFilesIntoEntryFolder(string folder, string[] files, bool move)
+        {
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder) || files == null || files.Length == 0) return;
+            DebugLog("[entry-drop] folder=" + folder + " move=" + move + " files=" + string.Join(";", files));
+            foreach (var src0 in files)
+            {
+                var src = src0;
+                if (string.IsNullOrEmpty(src) || (!File.Exists(src) && !Directory.Exists(src))) continue;
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        string dst = PopupForm.UniqueDest(src, folder);
+                        if (dst == src) { DebugLog("[entry-drop-skip] same path " + src); return; }
+                        if (Directory.Exists(src)) { if (move) Directory.Move(src, dst); else PopupForm.CopyDir(src, dst); }
+                        else { if (move) File.Move(src, dst); else File.Copy(src, dst); }
+                        DebugLog("[entry-drop-ok] " + src + " -> " + dst);
+                        var cur = _entryListForm;
+                        if (cur != null && !cur.IsDisposed)
+                            cur.BeginInvoke((MethodInvoker)delegate
+                            {
+                                try { System.Media.SystemSounds.Beep.Play(); } catch { }
+                                RefreshPanelsShowing(move ? Path.GetDirectoryName(src) : null, folder);
+                            });
+                    }
+                    catch (Exception ex) { DebugLog("[entry-drop-fail] " + src + " -> " + folder + " : " + ex.Message); }
+                });
+            }
+        }
+
+        // 收藏·历史列表点击：用资源管理器打开文件夹（不再展开 HoverExplorer 级联列表）
+        internal static void OpenFolderInExplorer(string path, Point pt)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            _entryArmed = false;   // 解除区域/卡片悬停武装：须鼠标离开后再进入才重弹列表
+            // 关掉行悬停弹出的子列表（未固定面板），避免残留在屏幕上盖住刚打开的 Explorer
+            var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+            foreach (var p in nonPinned) p.ClosePanel();
+            _panels.RemoveAll(p => !p.Pinned);
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+                EntryListForm.RecordRecent(path);
+                DebugLog("[entry] folder explorer-opened " + path);
+            }
+            catch (Exception ex) { DebugLog("[entry] explorer open fail: " + ex.Message); }
+        }
+
+        // 从入口列表点击展开某文件夹的级联列表
+        internal static void ShowFolderListAt(string path, Point pt)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+            foreach (var p in nonPinned) p.ClosePanel();
+            _panels.RemoveAll(p => !p.Pinned);
+            var p2 = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
+            if (p2.ShowPanel(path, pt.X, pt.Y))
+            {
+                _panels.Add(p2);
+                p2.Show();
+                EntryListForm.RecordRecent(path);
+                DebugLog("[entry] folder opened " + path);
+            }
+            else p2.Dispose();
+        }
+
+        // 文件夹卡片徽章悬停：在卡片下方（与卡片左对齐）弹出该文件夹的列表
+        internal static void ShowCardFolderList(HoverExplorer.PinCardForm card, string path)
+        {
+            if (card == null || card.IsDisposed || string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            var exist = _panels.FirstOrDefault(p => !p.IsDisposed && !p.Pinned && p.Level == 0);
+            if (exist != null && exist.CurrentPath == path) return;   // 已开着同目录列表
+            var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+            foreach (var p in nonPinned) p.ClosePanel();
+            _panels.RemoveAll(p => !p.Pinned);
+            var p2 = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
+            if (p2.ShowPanel(path, card.Left, card.Bottom + 4))
+            {
+                _panels.Add(p2);
+                p2.Show();
+                EntryListForm.RecordRecent(path);
+                DebugLog("[card-panel] OPENED " + path + " at " + p2.Left + "," + p2.Top);
+            }
+            else
+            {
+                p2.Dispose();
+            }
+        }
+
         private static DateTime _lastTrim;
         private static void MaybeTrimMemory()
         {
@@ -945,11 +1410,24 @@ namespace HoverExplorer
             _subCloseTimer.Tick += (s, e) =>
             {
                 _subCloseTimer.Stop(); _subCloseTimer.Dispose(); _subCloseTimer = null;
+                // 面板行拖出进行中：级联保持（收面板会掐断拖拽会话）
+                if (_panels.Any(p => !p.IsDisposed && p.IsDragging)) { DebugLog("[cascade] dragging hold, level=" + _subCloseLevel); return; }
                 NativeMethods.POINT pt;
                 NativeMethods.GetCursorPos(out pt);
                 // 按 Level 属性判断层级，不用数组索引（pinned 面板会导致索引错位）
                 bool inSub = _panels.Any(p => p.Level > _subCloseLevel && p.ContainsPoint(pt.X, pt.Y));
-                if (!inSub) CloseAfter(_subCloseLevel);
+                if (!inSub)
+                {
+                    // KeepOnLeave：鼠标已离开所有面板（含面板内预览）= 离开语义 → 级联保持，等点击其他位置；
+                    // 仍悬在其他面板上（一级列表内换行/切换）→ 正常关闭旧级联
+                    if (Config.KeepOnLeave)
+                    {
+                        bool inAny = PopupForm.InAnyHoverPanel(pt.X, pt.Y)
+                                  || _panels.Any(p => !p.IsDisposed && p.PreviewContainsPoint(pt.X, pt.Y));
+                        if (!inAny) { DebugLog("[cascade] KeepOnLeave hold, level=" + _subCloseLevel); return; }
+                    }
+                    CloseAfter(_subCloseLevel);
+                }
             };
             _subCloseTimer.Start();
         }
@@ -1029,9 +1507,11 @@ namespace HoverExplorer
     {
         public event Action HotkeyPressed;       // 悬停开关
         public event Action CardHotkeyPressed;   // 剪贴板→卡片
+        public event Action EntryHotkeyPressed;  // 收藏·历史 列表
         private const int HoverId = 0xB001;
         private const int CardId = 0xB002;
-        private bool _hoverRegistered, _cardRegistered;
+        private const int EntryId = 0xB003;
+        private bool _hoverRegistered, _cardRegistered, _entryRegistered;
         private readonly int _createdTick = Environment.TickCount;   // 启动防抖：忽略键状态残留导致的立即 WM_HOTKEY
 
         public HotkeyWindow()
@@ -1040,6 +1520,7 @@ namespace HoverExplorer
             CreateHandle(cp);
             RegisterHover();
             RegisterCard();
+            RegisterEntry();
         }
 
         private void RegisterHover()
@@ -1058,6 +1539,14 @@ namespace HoverExplorer
             _cardRegistered = NativeMethods.RegisterHotKey(Handle, CardId, Config.CardHotkeyModifiers, Config.CardHotkeyKey);
         }
 
+        private void RegisterEntry()
+        {
+            if (_entryRegistered) return;
+            if (!Config.EntryHotkeyEnabled) return;
+            if (Config.EntryHotkeyModifiers == 0 && Config.EntryHotkeyKey == 0) return;
+            _entryRegistered = NativeMethods.RegisterHotKey(Handle, EntryId, Config.EntryHotkeyModifiers, Config.EntryHotkeyKey);
+        }
+
         public bool ReRegister()
         {
             UnregisterHover();
@@ -1072,6 +1561,13 @@ namespace HoverExplorer
             return _cardRegistered || !Config.CardHotkeyEnabled;
         }
 
+        public bool ReRegisterEntry()
+        {
+            UnregisterEntry();
+            RegisterEntry();
+            return _entryRegistered || !Config.EntryHotkeyEnabled;
+        }
+
         private void UnregisterHover()
         {
             if (_hoverRegistered) { NativeMethods.UnregisterHotKey(Handle, HoverId); _hoverRegistered = false; }
@@ -1080,6 +1576,11 @@ namespace HoverExplorer
         private void UnregisterCard()
         {
             if (_cardRegistered) { NativeMethods.UnregisterHotKey(Handle, CardId); _cardRegistered = false; }
+        }
+
+        private void UnregisterEntry()
+        {
+            if (_entryRegistered) { NativeMethods.UnregisterHotKey(Handle, EntryId); _entryRegistered = false; }
         }
 
         protected override void WndProc(ref Message m)
@@ -1092,6 +1593,7 @@ namespace HoverExplorer
                 int id = m.WParam.ToInt32();
                 if (id == HoverId && HotkeyPressed != null) HotkeyPressed();
                 else if (id == CardId && CardHotkeyPressed != null) CardHotkeyPressed();
+                else if (id == EntryId && EntryHotkeyPressed != null) EntryHotkeyPressed();
             }
             base.WndProc(ref m);
         }
@@ -1100,6 +1602,7 @@ namespace HoverExplorer
         {
             UnregisterHover();
             UnregisterCard();
+            UnregisterEntry();
             if (Handle != IntPtr.Zero) DestroyHandle();
         }
     }

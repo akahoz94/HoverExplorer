@@ -39,6 +39,8 @@ namespace HoverExplorer
         public static int HoverDelayMs { get { return Math.Max(50, (int)(HoverDelay * 1000)); } }
         public static int SubHoverDelay = 150;
         public static double CloseDelay = 0.35;
+        // 鼠标离开后关闭列表/预览窗的统一延迟（毫秒）：面板、预览窗、历史·收藏列表共用
+        public static int CloseDelayMs { get { return Math.Max(50, (int)Math.Round(CloseDelay * 1000)); } }
         public static int CheckInterval = 80;
         public static int PopupOffset = 16;
         public static int SubGap = 4;
@@ -56,6 +58,10 @@ namespace HoverExplorer
         public static int PreviewVideoH = 0;
         public static int PreviewAudioW = 0;
         public static int PreviewAudioH = 0;
+        // 音频预览上次是否折叠（折叠态高度固定 34，展开高度另记在 PreviewAudioH）
+        public static bool PreviewAudioCollapsed = true;
+        // 收藏·历史列表宽度：0=按内容自适应；>0=用户拖宽后记忆
+        public static int EntryListW = 0;
         // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
         public static double PreviewMaxRatio = 0.8;
         // 固定为"仅图标/名称触发"（已移除该开关）
@@ -83,12 +89,36 @@ namespace HoverExplorer
         public static bool CardHotkeyEnabled = true;
         public static int CardHotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
         public static int CardHotkeyKey = 86; // V
+        // 历史/收藏文件夹入口：全局热键 + 桌面触发区域（矩形为 0 = 未设置）
+        public static bool EntryHotkeyEnabled = false;
+        public static int EntryHotkeyModifiers = 0x2 | 0x1; // Ctrl+Alt
+        public static int EntryHotkeyKey = 69; // E
+        public static int EntryRectX = 0, EntryRectY = 0, EntryRectW = 0, EntryRectH = 0;
+        // 触发区域的 RGBA 标识色（ARGB）：桌面穿透色块 + 设置面板色块预览
+        public static int EntryRectColor = 0x283B8EEA;   // 蓝 ≈16% 透明度
+        // 收藏文件夹（用户手动）与最近打开（自动 MRU，上限 EntryRecentMax）
+        public static List<string> FavoriteFolders = new List<string>();
+        public static List<string> RecentFolders = new List<string>();
+        public static readonly int EntryRecentMax = 15;
+        // 鼠标离开启用的面板/预览不自动关闭，点击其他位置才收起
+        public static bool KeepOnLeave = false;
+        // 行布局互换：名称靠右，大小/子项数与行内按钮靠左（左侧移动不触发悬停调度）
+        public static bool RowSwapSides = false;
+        // 互换布局的分栏分隔线位置（行内 X 像素）；0=自动（按钮组+大小列宽度），拖动后持久化
+        public static int RowSplitX = 0;
+        // 按住 Alt 临时禁用悬停（不弹新面板/预览，已调度取消；松开恢复）
+        public static bool AltSuppressHover = true;
+        // 文件夹列表排列方式（全局）：name/size/date + 升降序，切换排序按钮时更新
+        public static string SortMode = "name";
+        public static bool SortDesc = false;
         public static string Language = "zh";
         public static string Theme = "dark";
+        // 桌面卡片配色索引（独立于 Theme：面板主题不影响卡片；卡片上滚轮可循环切换）
+        public static int CardPaletteIndex = 0;
         public static List<PinnedItem> PinnedItems = new List<PinnedItem>();
         public static readonly string FontName = "Microsoft YaHei UI";
         public static readonly float FontSize = 10f;
-        public static Color BG, FG, BgHover, BgDir, FgDir, DropHighlight, BgSel, Border, PlaceholderFg, Accent;
+        public static Color BG, FG, BgHover, BgDir, FgDir, DropHighlight, BgSel, Border, PlaceholderFg, Accent, BtnHover;
 
         static Config()
         {
@@ -110,6 +140,7 @@ namespace HoverExplorer
                 Border = ColorTranslator.FromHtml("#42424a");
                 PlaceholderFg = ColorTranslator.FromHtml("#8d8d99");
                 Accent = ColorTranslator.FromHtml("#6aa9ff");
+                BtnHover = ColorTranslator.FromHtml("#3d3d47");
             }
             else
             {
@@ -122,7 +153,128 @@ namespace HoverExplorer
                 Border = ColorTranslator.FromHtml("#e8e8ec");
                 PlaceholderFg = ColorTranslator.FromHtml("#7a7a88");
                 Accent = ColorTranslator.FromHtml("#0067c0");
+                BtnHover = ColorTranslator.FromHtml("#dcdfe9");
             }
+            ApplyListPalette();
+        }
+
+        // 列表配色 15 变量（仅浅色启用自定义；深色=主题色）。用户可粘贴 key=#hex 覆盖
+        public static Color ListBg, ListZb, ListFg, ListMu, ListHv, ListSel, ListSelFg, ListBar, ListDrop, ListAc, ListAcFg, ListBd, ListSb, ListHdbg, ListBtnHv, ListCanvas;
+        // 用户粘贴的原始文本（key=#hex 每行一个，# 可省略；空=暖灰斑马默认）
+        public static string ListPalette = "";
+        // 已保存的配色方案列表，格式：每行 name=escapedText（text 中 \n→\\n、=→\\e）；空=无方案
+        public static string ListPalettesData = "";
+
+        // 解析已保存的配色方案（与 SettingsForm 的序列化格式一致），供面板滚轮切换使用
+        public static List<KeyValuePair<string, string>> PaletteSchemes()
+        {
+            var list = new List<KeyValuePair<string, string>>();
+            if (string.IsNullOrEmpty(ListPalettesData)) return list;
+            foreach (var raw in ListPalettesData.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (string.IsNullOrEmpty(line)) continue;
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string nm = line.Substring(0, eq).Replace("\\e", "=");
+                string tx = line.Substring(eq + 1).Replace("\\n", "\n").Replace("\\e", "=");
+                list.Add(new KeyValuePair<string, string>(nm, tx));
+            }
+            return list;
+        }
+
+        public static void ApplyListPalette()
+        {
+            bool dark = Theme != null && Theme != "light";
+            if (dark)
+            {
+                ListBg = BG; ListZb = BG; ListFg = FG; ListMu = PlaceholderFg;
+                ListHv = BgHover; ListSel = BgSel; ListSelFg = Color.White;
+                ListBar = BtnHover; ListDrop = DropHighlight;
+                ListAc = Accent; ListAcFg = Color.White; ListBd = Border;
+                ListSb = Border; ListHdbg = BgHover; ListBtnHv = BtnHover; ListCanvas = BG;
+                return;
+            }
+            // 浅色默认：暖灰斑马
+            ListBg = ColorTranslator.FromHtml("#f7f3ee");
+            ListZb = ColorTranslator.FromHtml("#f0e9de");
+            ListFg = ColorTranslator.FromHtml("#3b2f25");
+            ListMu = ColorTranslator.FromHtml("#8a7664");
+            ListHv = ColorTranslator.FromHtml("#ecdcc3");
+            ListSel = ColorTranslator.FromHtml("#8a5a3c");
+            ListSelFg = ColorTranslator.FromHtml("#ffffff");
+            ListBar = ColorTranslator.FromHtml("#e6d2ab");
+            ListDrop = ColorTranslator.FromHtml("#2d7a3d");
+            ListAc = ColorTranslator.FromHtml("#8a5a3c");
+            ListAcFg = ColorTranslator.FromHtml("#ffffff");
+            ListBd = ColorTranslator.FromHtml("#d6c7b2");
+            ListSb = ColorTranslator.FromHtml("#c4b399");
+            ListHdbg = ColorTranslator.FromHtml("#f0e8dc");
+            ListBtnHv = ColorTranslator.FromHtml("#e0d0b8");
+            ListCanvas = ListBg;   // 列表画布底色默认=行背景；用户可单独设以分离行底与画布底
+            if (string.IsNullOrEmpty(ListPalette)) return;
+            foreach (var line in ListPalette.Split('\n'))
+            {
+                var t = line.Trim().TrimEnd('\\');   // 容错：AI 输出可能每行尾带反斜线/代码块标记
+                if (string.IsNullOrEmpty(t) || t.StartsWith("//") || t.StartsWith("```")) continue;
+                int eq = t.IndexOf('=');
+                if (eq <= 0) continue;
+                string k = t.Substring(0, eq).Trim().ToLowerInvariant();
+                string v = t.Substring(eq + 1).Trim();
+                if (v.StartsWith("#")) v = v.Substring(1);
+                // 正则提取 6/8 位十六进制，忽略任何尾随/前导垃圾（反斜线、分号、Markdown 残留等）
+                var m = System.Text.RegularExpressions.Regex.Match(v, "[0-9a-fA-F]{6,8}");
+                if (!m.Success) continue;
+                Color c;
+                try { c = ColorTranslator.FromHtml("#" + m.Value); } catch { continue; }
+                switch (k)
+                {
+                    case "bg": ListBg = c; break;
+                    case "zb": ListZb = c; break;
+                    case "fg": ListFg = c; break;
+                    case "mu": ListMu = c; break;
+                    case "hv": ListHv = c; break;
+                    case "sel": ListSel = c; break;
+                    case "selfg": ListSelFg = c; break;
+                    case "bar": ListBar = c; break;
+                    case "drop": ListDrop = c; break;
+                    case "ac": ListAc = c; break;
+                    case "acfg": ListAcFg = c; break;
+                    case "bd": ListBd = c; break;
+                    case "sb": ListSb = c; break;
+                    case "hdbg": ListHdbg = c; break;
+                    case "btnhv": ListBtnHv = c; break;
+                    case "canvas": ListCanvas = c; break;
+                }
+            }
+        }
+
+        // 解析配色文本为 15 色字典A字典（基于当前 ListXxx + text 覆盖，不写全局；色块预览用）
+        public static Dictionary<string, Color> ParsePalette(string text)
+        {
+            var map = new Dictionary<string, Color>
+            {
+                {"bg",ListBg},{"zb",ListZb},{"fg",ListFg},{"mu",ListMu},{"hv",ListHv},
+                {"sel",ListSel},{"selfg",ListSelFg},{"bar",ListBar},{"drop",ListDrop},{"ac",ListAc},
+                {"acfg",ListAcFg},{"bd",ListBd},{"sb",ListSb},{"hdbg",ListHdbg},{"btnhv",ListBtnHv},{"canvas",ListCanvas},
+            };
+            if (string.IsNullOrEmpty(text)) return map;
+            foreach (var line in text.Split('\n'))
+            {
+                var t = line.Trim().TrimEnd('\\');
+                if (string.IsNullOrEmpty(t) || t.StartsWith("//") || t.StartsWith("```")) continue;
+                int eq = t.IndexOf('=');
+                if (eq <= 0) continue;
+                string k = t.Substring(0, eq).Trim().ToLowerInvariant();
+                string v = t.Substring(eq + 1).Trim();
+                if (v.StartsWith("#")) v = v.Substring(1);
+                var m = System.Text.RegularExpressions.Regex.Match(v, "[0-9a-fA-F]{6,8}");
+                if (!m.Success) continue;
+                Color c;
+                try { c = ColorTranslator.FromHtml("#" + m.Value); } catch { continue; }
+                if (map.ContainsKey(k)) map[k] = c;
+            }
+            return map;
         }
         public static int TextPreviewLines = 10;
         public static readonly HashSet<string> TextExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -174,6 +326,8 @@ namespace HoverExplorer
                         case "PreviewVideoH": PreviewVideoH = Convert.ToInt32(v); break;
                         case "PreviewAudioW": PreviewAudioW = Convert.ToInt32(v); break;
                         case "PreviewAudioH": PreviewAudioH = Convert.ToInt32(v); break;
+                        case "PreviewAudioCollapsed": PreviewAudioCollapsed = Convert.ToBoolean(v); break;
+                        case "EntryListW": EntryListW = Convert.ToInt32(v); break;
                         case "PreviewMaxRatio": PreviewMaxRatio = Convert.ToDouble(v); break;
                         case "PanelWidth": PanelWidth = Convert.ToInt32(v); break;
                         case "PanelHeight": PanelHeight = Convert.ToInt32(v); break;
@@ -191,6 +345,7 @@ namespace HoverExplorer
                         case "HotkeyKey": HotkeyKey = Convert.ToInt32(v); break;
                         case "Language": Language = Convert.ToString(v); break;
                         case "Theme": Theme = Convert.ToString(v); break;
+                        case "CardPaletteIndex": CardPaletteIndex = Convert.ToInt32(v); break;
                         case "PinnedItems":
                             PinnedItems = new List<PinnedItem>();
                             foreach (var item in (System.Collections.ArrayList)v)
@@ -200,12 +355,37 @@ namespace HoverExplorer
                                 if (d.ContainsKey("Kind")) pi.Kind = Convert.ToString(d["Kind"]);
                                 if (string.IsNullOrEmpty(pi.Kind)) pi.Kind = "file";
                                 if (d.ContainsKey("Title")) pi.Title = Convert.ToString(d["Title"]);
+                                if (d.ContainsKey("Palette")) pi.Palette = Convert.ToInt32(d["Palette"]);
                                 PinnedItems.Add(pi);
                             }
                             break;
                         case "CardHotkeyEnabled": CardHotkeyEnabled = Convert.ToBoolean(v); break;
                         case "CardHotkeyModifiers": CardHotkeyModifiers = Convert.ToInt32(v); break;
                         case "CardHotkeyKey": CardHotkeyKey = Convert.ToInt32(v); break;
+                        case "EntryHotkeyEnabled": EntryHotkeyEnabled = Convert.ToBoolean(v); break;
+                        case "EntryHotkeyModifiers": EntryHotkeyModifiers = Convert.ToInt32(v); break;
+                        case "EntryHotkeyKey": EntryHotkeyKey = Convert.ToInt32(v); break;
+                        case "EntryRectX": EntryRectX = Convert.ToInt32(v); break;
+                        case "EntryRectY": EntryRectY = Convert.ToInt32(v); break;
+                        case "EntryRectW": EntryRectW = Convert.ToInt32(v); break;
+                        case "EntryRectH": EntryRectH = Convert.ToInt32(v); break;
+                        case "EntryRectColor": EntryRectColor = Convert.ToInt32(v); break;
+                        case "FavoriteFolders":
+                            FavoriteFolders = new List<string>();
+                            foreach (var f in (System.Collections.ArrayList)v) FavoriteFolders.Add(Convert.ToString(f));
+                            break;
+                        case "RecentFolders":
+                            RecentFolders = new List<string>();
+                            foreach (var f in (System.Collections.ArrayList)v) RecentFolders.Add(Convert.ToString(f));
+                            break;
+                        case "KeepOnLeave": KeepOnLeave = Convert.ToBoolean(v); break;
+                        case "RowSwapSides": RowSwapSides = Convert.ToBoolean(v); break;
+                        case "RowSplitX": RowSplitX = Convert.ToInt32(v); break;
+                        case "AltSuppressHover": AltSuppressHover = Convert.ToBoolean(v); break;
+                        case "ListPalette": ListPalette = Convert.ToString(v); break;
+                        case "ListPalettesData": ListPalettesData = Convert.ToString(v); break;
+                        case "SortMode": SortMode = Convert.ToString(v); break;
+                        case "SortDesc": SortDesc = Convert.ToBoolean(v); break;
                     }
                 }
                 I18n.Lang = Language;
@@ -243,9 +423,29 @@ namespace HoverExplorer
                 data["CardHotkeyEnabled"] = CardHotkeyEnabled;
                 data["CardHotkeyModifiers"] = CardHotkeyModifiers;
                 data["CardHotkeyKey"] = CardHotkeyKey;
+                data["EntryHotkeyEnabled"] = EntryHotkeyEnabled;
+                data["EntryHotkeyModifiers"] = EntryHotkeyModifiers;
+                data["EntryHotkeyKey"] = EntryHotkeyKey;
+                data["EntryRectX"] = EntryRectX;
+                data["EntryRectY"] = EntryRectY;
+                data["EntryRectW"] = EntryRectW;
+                data["EntryRectH"] = EntryRectH;
+                data["EntryRectColor"] = EntryRectColor;
+                data["FavoriteFolders"] = FavoriteFolders;
+                data["RecentFolders"] = RecentFolders;
+                data["KeepOnLeave"] = KeepOnLeave;
+                data["RowSwapSides"] = RowSwapSides;
+                data["RowSplitX"] = RowSplitX;
+                data["AltSuppressHover"] = AltSuppressHover;
+                data["ListPalette"] = ListPalette;
+                data["ListPalettesData"] = ListPalettesData;
+                data["SortMode"] = SortMode;
+                data["SortDesc"] = SortDesc;
                 data["Language"] = Language;
                 data["Theme"] = Theme;
+                data["CardPaletteIndex"] = CardPaletteIndex;
                 data["HoverDelay"] = HoverDelay;
+                data["CloseDelay"] = CloseDelay;
                 data["PreviewMinWidth"] = PreviewMinWidth;
                 data["PreviewOriginalSize"] = PreviewOriginalSize;
                 data["PreviewImgW"] = PreviewImgW;
@@ -256,6 +456,8 @@ namespace HoverExplorer
                 data["PreviewVideoH"] = PreviewVideoH;
                 data["PreviewAudioW"] = PreviewAudioW;
                 data["PreviewAudioH"] = PreviewAudioH;
+                data["PreviewAudioCollapsed"] = PreviewAudioCollapsed;
+                data["EntryListW"] = EntryListW;
                 data["PreviewMaxRatio"] = PreviewMaxRatio;
                 data["PanelWidth"] = PanelWidth;
                 data["PanelHeight"] = PanelHeight;
@@ -287,5 +489,6 @@ namespace HoverExplorer
         public string Title = "";      // 可选显示标题（url/text）
         public int X;
         public int Y;
+        public int Palette = -1;       // 该卡片自己的配色索引；-1 = 跟随默认（Config.CardPaletteIndex）
     }
 }

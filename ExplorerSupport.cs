@@ -10,6 +10,36 @@ namespace HoverExplorer
         private static System.Collections.Generic.List<string> _cachedTabs;
         private static DateTime _cacheTime;
 
+        // 当前打开的资源管理器窗口/标签的文件夹路径集合（历史 MRU 用）。
+        // 走 ShellWindows COM 枚举 LocationURL（file:/// 转本地路径），实测含多标签；
+        // 不依赖 UIA 面包屑类名（FileExplorerExtensions.BreadcrumbBarItemControl
+        // 在部分 Win11 版本/视图下 FindAll 落空），HWND 属性亦不可靠（无窗口项抛错）→ 全量记录
+        public static System.Collections.Generic.List<string> GetOpenExplorerPaths()
+        {
+            var list = new System.Collections.Generic.List<string>();
+            try
+            {
+                // CLSID_ShellWindows 后期绑定，免 COM 引用
+                var t = Type.GetTypeFromCLSID(new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39"));
+                var obj = Activator.CreateInstance(t);
+                foreach (var item in (System.Collections.IEnumerable)obj)
+                {
+                    string loc = null;
+                    try { loc = (string)item.GetType().InvokeMember("LocationURL", System.Reflection.BindingFlags.GetProperty, null, item, null); }
+                    catch { continue; }
+                    if (string.IsNullOrEmpty(loc) || !loc.StartsWith("file:///", StringComparison.OrdinalIgnoreCase)) continue;
+                    try
+                    {
+                        var p = new Uri(loc).LocalPath;
+                        if (Directory.Exists(p)) list.Add(p);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return list;
+        }
+
         public static string DetectHoverItem(int mx, int my, out System.Drawing.Rectangle rect, out bool isDir)
         {
             rect = System.Drawing.Rectangle.Empty;

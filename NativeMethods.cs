@@ -145,6 +145,7 @@ namespace HoverExplorer
         [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
         public static extern int StrCmpLogicalW(string x, string y);
 
+
         // keybd_event：text 卡片"粘贴"按钮模拟 Ctrl+V（卡片 MA_NOACTIVATE 不抢原焦点）
         [DllImport("user32.dll")]
         public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);

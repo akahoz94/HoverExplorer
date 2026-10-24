@@ -7,42 +7,63 @@ using System.Windows.Forms;
 
 namespace HoverExplorer
 {
-    // 参考原型（PixPin_2026-10-22）重排：单栏分组 + 行式设置项（左标题描述/右控件）+ 底部按钮
+    // 参考原型方案 A（紧凑手风琴）重排：
+    // 分组标题行 = 状态点 + 标题 + 摘要 chip + 主开关 + 箭头；单开手风琴 + 全部展开/收起；
+    // 内容区独立滚动，确定/取消固定底栏。「默认排序」独立成组（非 TC 设置项）。
     internal class SettingsForm : Form
     {
-        private ToggleSwitch _hoverToggle;
-        private ToggleSwitch _cardToggle;
-        private HotkeyPill _hoverPill;
-        private HotkeyPill _cardPill;
-        private DelayStepper _delayStepper;
-        private ComboBox _tcSortCombo;
-        private Button _okBtn;
-        private Button _cancelBtn;
+        private const int PadX = 24;
+        private const int RowH = 46;
+        private const int HeadAreaH = 62;
+        private const int DonateH = 160;   // 赞赏区（固定底栏上方）：二维码150 + 边距
+        private const int ScrollBarW = 10; // SlimScrollBar 占宽
+
+        private readonly List<AccGroup> _groups = new List<AccGroup>();
+        private AccGroup _hoverGroup;
+        private AccGroup _cardGroup;
+        private AccGroup _entryGroup;
+        private AccGroup _sortGroup;
+        private AccGroup _tcGroup;
+        private ViewportPanel _viewport;
+        private FlowLayoutPanel _scrollPanel;
+        private SlimScrollBar _scrollBar;
+        private Button _expandBtn;
         private Label _closeBtn;
         private Label _verLbl;
-        private Label _hoverHintLbl;
-        private Label _cardHintLbl;
+
+        private ToggleSwitch _hoverToggle;
+        private ToggleSwitch _cardToggle;
+        private ToggleSwitch _keepToggle;
+        private ToggleSwitch _rowSwapToggle;
+        private ToggleSwitch _altSuppressToggle;
+        private ToggleSwitch _entryToggle;
+        private HotkeyPill _hoverPill;
+        private HotkeyPill _cardPill;
+        private HotkeyPill _entryPill;
+        private DelayStepper _delayStepper;
+        private MsStepper _closeDelayStepper;
+        private ComboBox _tcSortCombo;
+        private ComboBox _sortCombo;
+        private Label _areaLbl;
+        private Button _areaPickBtn;
+        private Button _areaClearBtn;
+        private Panel _areaColorBlock;
+        private int _entryColor;
+        private static readonly int[] _areaColors = {
+            0x283B8EEA, 0x2852A883, 0x28F0B429, 0x289B5DE5,
+            0x28E5567A, 0x2814B8A6, 0x28C98A2B, 0x28888888,
+        };
+        private Rectangle _entryRect;
 
         private int _hoverMods;
         private int _hoverKey;
         private int _cardMods;
         private int _cardKey;
+        private int _entryMods;
+        private int _entryKey;
         private bool _hoverRecording;
         private bool _cardRecording;
-
-        private const int PadX = 24;
-        private const int RowH = 48;
-        private const int TitleBarH = 60;
-
-
-        public bool HotkeyEnabled { get; private set; }
-        public int HotkeyModifiers { get; private set; }
-        public int HotkeyKey { get; private set; }
-        public double HoverDelaySetting { get; private set; }
-        public int TcSortSetting { get; private set; }
-        public bool CardHotkeyEnabledSetting { get; private set; }
-        public int CardHotkeyModifiersSetting { get; private set; }
-        public int CardHotkeyKeySetting { get; private set; }
+        private bool _entryRecording;
 
         private static LinkLabel MakeLink(string text, int x, int y, string url)
         {
@@ -76,26 +97,29 @@ namespace HoverExplorer
             MaximizeBox = false;
             MinimizeBox = false;
             Width = 500;
+            Height = Math.Min(720, Screen.FromPoint(Cursor.Position).WorkingArea.Height - 60);
             ShowInTaskbar = false;
             DoubleBuffered = true;
             KeyPreview = true;
-
-            HotkeyEnabled = Config.HotkeyEnabled;
 
             _hoverMods = Config.HotkeyModifiers;
             _hoverKey = Config.HotkeyKey;
             _cardMods = Config.CardHotkeyModifiers;
             _cardKey = Config.CardHotkeyKey;
+            _entryMods = Config.EntryHotkeyModifiers;
+            _entryKey = Config.EntryHotkeyKey;
+            _entryRect = Config.EntryRectW >= 20 ? new Rectangle(Config.EntryRectX, Config.EntryRectY, Config.EntryRectW, Config.EntryRectH) : Rectangle.Empty;
+            _entryColor = Array.IndexOf(_areaColors, Config.EntryRectColor) >= 0 ? Config.EntryRectColor : _areaColors[0];
 
-            int contentRight = Width - PadX;
-
-            // ---- 标题区 ----
+            // ---- 头部（固定）：标题 + 副标题 + 全部展开/收起 + 关闭 ----
+            // 标题栏底色由 OnPaint 绘制（与组标题 BgHover 同色）
             var titleLbl = new Label
             {
                 Text = I18n.T("settings"),
-                Location = new Point(PadX, 18),
+                Location = new Point(PadX, 12),
                 AutoSize = true,
-                Font = new Font(Config.FontName, 13f, FontStyle.Bold)
+                Font = new Font(Config.FontName, 13f, FontStyle.Bold),
+                BackColor = Config.BgHover
             };
             titleLbl.MouseDown += (s, e) => _fnDrag(e);
             Controls.Add(titleLbl);
@@ -103,66 +127,421 @@ namespace HoverExplorer
             var subLbl = new Label
             {
                 Text = I18n.T("settings_subtitle"),
-                Location = new Point(PadX, 46),
+                Location = new Point(PadX, 40),
                 AutoSize = true,
                 ForeColor = Config.PlaceholderFg,
                 Font = new Font(Config.FontName, 8.5f),
-                Tag = "sub"
+                Tag = "sub",
+                BackColor = Config.BgHover
             };
             subLbl.MouseDown += (s, e) => _fnDrag(e);
             Controls.Add(subLbl);
 
-            // ---- 分组 1：悬停预览 ----
-            int y = _fnAddGroup(70, I18n.T("group_hover"));
+            _closeBtn = new Label
+            {
+                Text = "×",
+                Size = new Size(28, 24),
+                Location = new Point(Width - 32, 8),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font(Config.FontName, 11),
+                Cursor = Cursors.Hand
+            };
+            _closeBtn.Click += (s, e) => Close();
+            _closeBtn.MouseEnter += (s, e) => _closeBtn.BackColor = Config.BgHover;
+            _closeBtn.MouseLeave += (s, e) => _closeBtn.BackColor = Config.BG;
+            Controls.Add(_closeBtn);
 
-            y = 92;
+            _expandBtn = new Button
+            {
+                Text = I18n.T("settings_expand"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, 8.5f),
+                AutoSize = true,
+                Height = 24,
+                Cursor = Cursors.Hand,
+                Tag = "plain"
+            };
+            _expandBtn.FlatAppearance.BorderSize = 1;
+            _expandBtn.FlatAppearance.MouseOverBackColor = Config.BgHover;
+            _expandBtn.Click += (s, e) =>
+            {
+                bool anyClosed = false;
+                foreach (var g in _groups) if (!g.Open) { anyClosed = true; break; }
+                foreach (var g in _groups) g.Open = anyClosed;
+                _fnSyncScroll();
+                _fnUpdateExpandBtn();
+            };
+            _fnPlaceExpandBtn();
+            Controls.Add(_expandBtn);
+
+            // ---- 内容滚动区（SlimScrollBar 自绘：无轨道 4px 滑块、悬停 8px；FlowLayoutPanel 垂直堆叠，组高度变化时下方自动下移）----
+            // 结构：viewport（固定可视区，裁切溢出）→ _scrollPanel（内容层，Y 偏移滚动）+ _scrollBar（Dock Right）
+            int viewH = Height - HeadAreaH;   // 赞助区已并入"关于"折叠组随滚动，不再预留固定高度；底部无按钮栏
+            _viewport = new ViewportPanel
+            {
+                Location = new Point(0, HeadAreaH),
+                Size = new Size(Width, viewH),
+                BackColor = Config.BG
+            };
+            _scrollPanel = new FlowLayoutPanel
+            {
+                Location = new Point(0, 0),
+                Size = new Size(Width - ScrollBarW, viewH),
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = false,
+                Padding = new Padding(PadX, 8, 0, 0),
+                BackColor = Config.BG
+            };
+            // FlowLayoutPanel.DoubleBuffered 受保护：反射开启，滚动移动时整列子控件一次合成绘制，消除卡顿闪烁
+            typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(_scrollPanel, true, null);
+            bool dark0 = Config.Theme != "light";
+            _scrollBar = new SlimScrollBar
+            {
+                Style = SlimScrollBar.BarStyle.Thin,
+                ThumbColor = dark0 ? ColorTranslator.FromHtml("#4a5260") : ColorTranslator.FromHtml("#b8bec8"),
+                ThumbHotColor = dark0 ? ColorTranslator.FromHtml("#6a7484") : ColorTranslator.FromHtml("#8a919b"),
+            };
+            _scrollBar.Scroll += (s, e) => _scrollPanel.Location = new Point(0, -_scrollBar.Value);
+            _viewport.Controls.Add(_scrollPanel);
+            _viewport.Controls.Add(_scrollBar);
+            Controls.Add(_viewport);
+
+            // ==== 组 1：悬停预览（默认展开）====
+            _hoverGroup = _fnNewGroup(I18n.T("group_hover"), true);
             _hoverToggle = new ToggleSwitch { On = Config.HotkeyEnabled };
-            _hoverToggle.Toggled += (s, e) => _fnUpdateHoverState();
-            y = _fnAddRow(y, I18n.T("hotkey_enabled"), I18n.T("hotkey_desc"), _hoverToggle, contentRight);
+            _hoverToggle.Toggled += (s, e) => { _fnUpdateHoverState(); _fnApplySettings(true, false); };
+            _hoverGroup.SetToggle(_hoverToggle);
+            _hoverGroup.AddChip(HotkeyDisplay(Config.HotkeyEnabled, _hoverMods, _hoverKey));
+            _hoverGroup.AddChip(string.Format("{0:0.00} {1}", Config.HoverDelay, I18n.T("delay_unit")));
+            _hoverGroup.AddChip(Config.CloseDelayMs + " ms");
 
+            int y = 8;
             _hoverPill = new HotkeyPill();
             _hoverPill.SetHotkey(_hoverMods, _hoverKey);
             _hoverPill.RecordClick += (s, e) => _fnStartHoverCapture();
-            _hoverHintLbl = _fnMakeHint();
-            int hoverKeyRowY = y;
-            y = _fnAddRow(y, I18n.T("hotkey_row"), null, null, contentRight);
-            _fnPlacePill(_hoverPill, hoverKeyRowY);
-            Controls.Add(_hoverPill);
-            _hoverHintLbl.Location = new Point(PadX, hoverKeyRowY + 19);
-            Controls.Add(_hoverHintLbl);
+            y = _hoverGroup.AddRow(y, I18n.T("hotkey_row"), I18n.T("hotkey_desc"), _hoverPill);
 
             _delayStepper = new DelayStepper { Value = Config.HoverDelay };
-            y = _fnAddRow(y, I18n.T("delay_row"), I18n.T("hover_delay_desc"), _delayStepper, contentRight);
+            _delayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
+            y = _hoverGroup.AddRow(y, I18n.T("delay_row"), I18n.T("hover_delay_desc"), _delayStepper);
 
-            _fnAddSep(230);
+            _closeDelayStepper = new MsStepper { Value = Config.CloseDelayMs };
+            _closeDelayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
+            y = _hoverGroup.AddRow(y, I18n.T("close_delay_row"), I18n.T("close_delay_desc"), _closeDelayStepper);
 
-            // ---- 分组 2：桌面卡片 ----
-            _fnAddGroup(244, I18n.T("group_card"));
+            _keepToggle = new ToggleSwitch { On = Config.KeepOnLeave };
+            _keepToggle.Toggled += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("keep_open"), I18n.T("keep_open_desc"), _keepToggle);
 
-            y = 266;
+            _rowSwapToggle = new ToggleSwitch { On = Config.RowSwapSides };
+            // 行布局互换影响已开面板的按钮位置 → 应用时刷新存活面板
+            _rowSwapToggle.Toggled += (s, e) => _fnApplySettings(false, true);
+            y = _hoverGroup.AddRow(y, I18n.T("row_swap"), I18n.T("row_swap_desc"), _rowSwapToggle);
+
+            _altSuppressToggle = new ToggleSwitch { On = Config.AltSuppressHover };
+            _altSuppressToggle.Toggled += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("alt_suppress"), I18n.T("alt_suppress_desc"), _altSuppressToggle);
+            _hoverGroup.FinishRows();
+
+
+            // ==== 组：列表配色 ====
+            var palGroup = _fnNewGroup(I18n.T("group_palette"), false);
+            y = 8;
+            y = palGroup.AddRow(y, I18n.T("list_palette"), I18n.T("list_palette_desc"), null);
+            int palW = palGroup.Width - 24;
+            Func<string, Button> mkBtn = delegate(string text)
+            {
+                var b = new Button { Text = text, Font = new Font(Config.FontName, 9f), FlatStyle = FlatStyle.Flat, BackColor = Config.BG, ForeColor = Config.FG, Height = 26, Visible = false };
+                b.FlatAppearance.BorderColor = Config.Border;
+                return b;
+            };
+            const string preset = "bg=f7f3ee\nzb=f0e9de\nfg=3b2f25\nmu=8a7664\nhv=ecdcc3\nsel=8a5a3c\nselfg=ffffff\nbar=e6d2ab\ndrop=2d7a3d\nac=8a5a3c\nacfg=ffffff\nbd=d6c7b2\nsb=c4b399\nhdbg=f0e8dc\nbtnhv=e0d0b8\ncanvas=f7f3ee";
+            var promptText = I18n.T("palette_prompt_text");
+            string[] palKeys = { "bg","zb","fg","mu","hv","sel","selfg","bar","drop","ac","acfg","bd","sb","hdbg","btnhv","canvas" };
+            string[] palLabels = { "行背景(奇)","斑马(偶)","名称文字","大小/数量","悬停高亮","选中背景","选中文字","大小背景条","拖拽放置","排序按钮底","排序按钮字","边框分隔线","滚动条","表头底色","按钮悬停","画布底色" };
+
+            // 行 1：方案下拉 + 删除 + 另存为（选中/改即应用，无应用按钮）；行 2：暖灰斑马 + 清空（拆行避免右侧溢出截断）
+            int row1Y = AccGroup.HeadH + y;
+            var schemeLbl = new Label { Text = I18n.T("palette_scheme") + ":", Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(12, row1Y + 4), AutoSize = true, Visible = false };
+            palGroup.Controls.Add(schemeLbl);
+            var schemeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Font = new Font(Config.FontName, 9f), Location = new Point(12 + schemeLbl.PreferredWidth + 8, row1Y), Width = 130, BackColor = Config.BG, ForeColor = Config.FG, Visible = false };
+            palGroup.Controls.Add(schemeCombo);
+            var btnDelScheme = mkBtn(I18n.T("del_scheme"));
+            var btnSaveAs = mkBtn(I18n.T("save_as"));
+            var btnPreset = mkBtn(I18n.T("warm_zebra"));
+            var btnClear = mkBtn(I18n.T("clear"));
+            using (var bg = Graphics.FromHwnd(IntPtr.Zero)) { using (var f9 = new Font(Config.FontName, 9f)) { foreach (var b in new[]{btnDelScheme,btnSaveAs,btnPreset,btnClear}) b.Width = (int)bg.MeasureString(b.Text, f9).Width + 24; } }
+            btnDelScheme.Location = new Point(schemeCombo.Right + 8, row1Y);
+            btnSaveAs.Location = new Point(btnDelScheme.Right + 8, row1Y);
+            palGroup.Controls.Add(btnDelScheme); palGroup.Controls.Add(btnSaveAs);
+            int rowPresetY = row1Y + 32;
+            btnPreset.Location = new Point(12, rowPresetY);
+            btnClear.Location = new Point(btnPreset.Right + 8, rowPresetY);
+            palGroup.Controls.Add(btnPreset); palGroup.Controls.Add(btnClear);
+
+            // 行 3：16 行可视化编辑器（中文标签 + 色块 + hex），色块点击弹 ColorDialog，改即应用
+            int row2Y = rowPresetY + 32;
+            int editorH = palKeys.Length * 24;
+            var editorPanel = new Panel { Location = new Point(12, row2Y), Size = new Size(palW, editorH), BackColor = Config.BG, Visible = false };
+            palGroup.Controls.Add(editorPanel);
+            var hexBoxes = new TextBox[palKeys.Length];
+            var colorBlocks = new Panel[palKeys.Length];
+            Action applyNow = null;
+            for (int i = 0; i < palKeys.Length; i++)
+            {
+                int ry = i * 24;
+                var lbl = new Label { Text = palLabels[i], Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, ry + 3), AutoSize = true };
+                var block = new Panel { Location = new Point(92, ry + 1), Size = new Size(24, 20), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
+                var hex = new TextBox { Location = new Point(122, ry), Size = new Size(64, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
+                editorPanel.Controls.Add(lbl); editorPanel.Controls.Add(block); editorPanel.Controls.Add(hex);
+                hexBoxes[i] = hex; colorBlocks[i] = block;
+                int idx = i;
+                block.Click += (s, e) => { using (var cd = new ColorDialog()) { if (cd.ShowDialog() == DialogResult.OK) { colorBlocks[idx].BackColor = cd.Color; hexBoxes[idx].Text = ColorTranslator.ToHtml(cd.Color).TrimStart('#'); if (applyNow != null) applyNow(); } } };
+            }
+            Action<string> fillEditor = delegate(string text)
+            {
+                var map = Config.ParsePalette(text);
+                for (int i = 0; i < palKeys.Length; i++) { Color c; map.TryGetValue(palKeys[i], out c); colorBlocks[i].BackColor = c; hexBoxes[i].Text = ColorTranslator.ToHtml(c).TrimStart('#'); }
+            };
+            applyNow = delegate()
+            {
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < palKeys.Length; i++) sb.Append(palKeys[i]).Append('=').Append(hexBoxes[i].Text).Append('\n');
+                if (sb.Length > 0) sb.Length--;
+                Config.ListPalette = sb.ToString(); Config.ApplyListPalette(); Config.Save(); Program.RefreshAllPanels();
+            };
+            for (int i = 0; i < palKeys.Length; i++) { int idx = i; hexBoxes[i].Leave += (s, e) => { try { colorBlocks[idx].BackColor = ColorTranslator.FromHtml("#" + hexBoxes[idx].Text); } catch { } applyNow(); }; }
+            fillEditor(Config.ListPalette);
+
+            // 行 4：AI 提示词（标签 + 复制按钮 + 粘贴导入按钮）
+            int row3Y = row2Y + editorH + 8;
+            var promptLbl = new Label { Text = I18n.T("palette_prompt"), Font = new Font(Config.FontName, 9f, FontStyle.Bold), ForeColor = Config.FG, Location = new Point(12, row3Y + 4), AutoSize = true, Visible = false };
+            palGroup.Controls.Add(promptLbl);
+            var btnCopyPrompt = mkBtn(I18n.T("copy_prompt"));
+            var btnPasteImport = mkBtn(I18n.T("paste_import"));
+            using (var bg2 = Graphics.FromHwnd(IntPtr.Zero)) { using (var f9b = new Font(Config.FontName, 9f)) { foreach (var b in new[]{btnCopyPrompt,btnPasteImport}) b.Width = (int)bg2.MeasureString(b.Text, f9b).Width + 24; } }
+            btnCopyPrompt.Location = new Point(promptLbl.Right + 12, row3Y);
+            btnPasteImport.Location = new Point(btnCopyPrompt.Right + 8, row3Y);
+            palGroup.Controls.Add(btnCopyPrompt); palGroup.Controls.Add(btnPasteImport);
+
+            // 方案列表数据解析/序列化（格式：每行 name=escapedText，text 中 \n→\\n、=→\\e）
+            Func<string, List<KeyValuePair<string,string>>> parsePalettes = delegate(string data)
+            {
+                var list = new List<KeyValuePair<string,string>>();
+                if (string.IsNullOrEmpty(data)) return list;
+                foreach (var line in data.Split('\n'))
+                {
+                    if (string.IsNullOrEmpty(line)) continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string nm = line.Substring(0, eq).Replace("\\e", "=");
+                    string tx = line.Substring(eq + 1).Replace("\\n", "\n").Replace("\\e", "=");
+                    list.Add(new KeyValuePair<string,string>(nm, tx));
+                }
+                return list;
+            };
+            Action<List<KeyValuePair<string,string>>> reloadCombo = delegate(List<KeyValuePair<string,string>> schemes)
+            {
+                schemeCombo.Items.Clear();
+                foreach (var kv in schemes) schemeCombo.Items.Add(kv.Key);
+            };
+            var schemes0 = parsePalettes(Config.ListPalettesData);
+            reloadCombo(schemes0);
+
+            schemeCombo.SelectedIndexChanged += (s, e) => { if (schemeCombo.SelectedIndex >= 0) { fillEditor(schemes0[schemeCombo.SelectedIndex].Value); applyNow(); } };
+            btnPreset.Click += (s, e) => { fillEditor(preset); applyNow(); };
+            btnClear.Click += (s, e) => { Config.ListPalette = ""; Config.ApplyListPalette(); Config.Save(); fillEditor(""); Program.RefreshAllPanels(); };
+            btnDelScheme.Click += (s, e) =>
+            {
+                if (schemeCombo.SelectedIndex < 0) return;
+                schemes0.RemoveAt(schemeCombo.SelectedIndex);
+                var sb = new System.Text.StringBuilder();
+                foreach (var kv in schemes0) sb.Append(kv.Key.Replace("=","\\e")).Append('=').Append(kv.Value.Replace("\n","\\n").Replace("=","\\e")).Append('\n');
+                Config.ListPalettesData = sb.ToString(); Config.Save(); reloadCombo(schemes0);
+            };
+            btnSaveAs.Click += (s, e) =>
+            {
+                applyNow();
+                string nm = PromptName(I18n.T("scheme_name"), I18n.T("scheme_name"));
+                if (string.IsNullOrEmpty(nm)) return;
+                schemes0.Add(new KeyValuePair<string,string>(nm, Config.ListPalette));
+                var sb = new System.Text.StringBuilder();
+                foreach (var kv in schemes0) sb.Append(kv.Key.Replace("=","\\e")).Append('=').Append(kv.Value.Replace("\n","\\n").Replace("=","\\e")).Append('\n');
+                Config.ListPalettesData = sb.ToString(); Config.Save(); reloadCombo(schemes0); schemeCombo.SelectedIndex = schemeCombo.Items.Count - 1;
+            };
+            btnCopyPrompt.Click += (s, e) => { try { Clipboard.SetText(promptText); } catch { } };
+            // 粘贴导入：读剪贴板 key=hex 行，校验至少命中一个已知 key 后填入编辑器并即时应用（未写的 key 保留原值，由 ParsePalette 兜底）
+            btnPasteImport.Click += (s, e) =>
+            {
+                string clip = null;
+                try { clip = Clipboard.GetText(); } catch { }
+                int hit = 0;
+                if (!string.IsNullOrEmpty(clip))
+                {
+                    foreach (var line in clip.Split('\n'))
+                    {
+                        var t = line.Trim();
+                        int eq = t.IndexOf('='); if (eq <= 0) continue;
+                        string k = t.Substring(0, eq).Trim().ToLowerInvariant();
+                        string v = t.Substring(eq + 1).Trim();
+                        if (v.StartsWith("#")) v = v.Substring(1);
+                        if (Array.IndexOf(palKeys, k) >= 0 && System.Text.RegularExpressions.Regex.IsMatch(v, "[0-9a-fA-F]{6,8}")) hit++;
+                    }
+                }
+                if (hit == 0) { MessageBox.Show(this, I18n.T("paste_invalid"), Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+                fillEditor(clip); applyNow();
+            };
+            palGroup.ExpandRow(row3Y - AccGroup.HeadH + 34, 0);
+            palGroup.FinishRows();
+
+
+            // ==== 组 2：桌面卡片 ====
+            _cardGroup = _fnNewGroup(I18n.T("group_card"), false);
             _cardToggle = new ToggleSwitch { On = Config.CardHotkeyEnabled };
-            _cardToggle.Toggled += (s, e) => _fnUpdateCardState();
-            y = _fnAddRow(y, I18n.T("hotkey_enabled"), I18n.T("card_hotkey_desc"), _cardToggle, contentRight);
+            _cardToggle.Toggled += (s, e) => { _fnUpdateCardState(); _fnApplySettings(true, false); };
+            _cardGroup.SetToggle(_cardToggle);
+            _cardGroup.AddChip(HotkeyDisplay(Config.CardHotkeyEnabled, _cardMods, _cardKey));
 
+            y = 8;
             _cardPill = new HotkeyPill();
             _cardPill.SetHotkey(_cardMods, _cardKey);
             _cardPill.RecordClick += (s, e) => _fnStartCardCapture();
-            _cardHintLbl = _fnMakeHint();
-            int cardKeyRowY = y;
-            _fnAddRow(y, I18n.T("hotkey_row"), null, null, contentRight);
-            _fnPlacePill(_cardPill, cardKeyRowY);
-            Controls.Add(_cardPill);
-            _cardHintLbl.Location = new Point(PadX, cardKeyRowY + 19);
-            Controls.Add(_cardHintLbl);
+            y = _cardGroup.AddRow(y, I18n.T("hotkey_row"), I18n.T("card_hotkey_desc"), _cardPill);
+            _cardGroup.FinishRows();
 
-            _fnAddSep(348);
 
-            // ---- 分组 3：排序 ----
-            _fnAddGroup(362, I18n.T("group_tc"));
+            // ==== 组 3：历史·收藏文件夹入口 ====
+            _entryGroup = _fnNewGroup(I18n.T("group_entry"), false);
+            _entryToggle = new ToggleSwitch { On = Config.EntryHotkeyEnabled };
+            _entryToggle.Toggled += (s, e) => { _fnUpdateEntryState(); _fnApplySettings(true, false); };
+            _entryGroup.SetToggle(_entryToggle);
+            _entryGroup.AddChip(HotkeyDisplay(Config.EntryHotkeyEnabled, _entryMods, _entryKey));
+            _entryGroup.AddChip("");   // 区域尺寸 chip（_fnUpdateAreaLbl 填充）
 
-            y = 384;
-            var pausedTag = new TagLabel(I18n.T("tag_paused"));
-            y = _fnAddRow(y, I18n.T("group_sort"), null, pausedTag, contentRight);
+            y = 8;
+            _entryPill = new HotkeyPill();
+            _entryPill.SetHotkey(_entryMods, _entryKey);
+            _entryPill.RecordClick += (s, e) => _fnStartEntryCapture();
+            y = _entryGroup.AddRow(y, I18n.T("entry_hotkey"), null, _entryPill);
+
+            // 触发区域行：色块 + 清除 + 框选（手动定位，desc 动态）
+            int areaRowY = y;
+            y = _entryGroup.AddRow(y, I18n.T("entry_area"), null, null);
+            _areaLbl = new Label
+            {
+                Text = I18n.T("area_none"),
+                Location = new Point(AccGroup.InL, AccGroup.HeadH + areaRowY + 19),
+                AutoSize = true,
+                MaximumSize = new Size(Math.Max(160, _entryGroup.Width - AccGroup.InL - 200), 0),
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub",
+                Visible = false
+            };
+            _entryGroup.Controls.Add(_areaLbl);
+
+            _areaPickBtn = new Button
+            {
+                Text = I18n.T("area_pick"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.Accent,
+                ForeColor = Color.White,
+                Font = new Font(Config.FontName, 8.5f),
+                Size = new Size(84, 26),
+                Cursor = Cursors.Hand,
+                Tag = "accent"
+            };
+            _areaPickBtn.FlatAppearance.BorderSize = 0;
+            _areaPickBtn.FlatAppearance.MouseOverBackColor = Config.Accent;
+            _areaPickBtn.Click += (s, e) => _fnPickArea();
+
+            _areaClearBtn = new Button
+            {
+                Text = I18n.T("area_clear"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, 8.5f),
+                Size = new Size(60, 26),
+                Cursor = Cursors.Hand,
+                Tag = "plain"
+            };
+            _areaClearBtn.FlatAppearance.BorderSize = 1;
+            _areaClearBtn.FlatAppearance.MouseOverBackColor = Config.BgHover;
+            _areaClearBtn.Click += (s, e) => { _entryRect = Rectangle.Empty; _fnUpdateAreaLbl(); };
+
+            // RGBA 色块：棋盘底 + 半透明色（同桌面色块观感），点击循环切换预设色
+            _areaColorBlock = new Panel
+            {
+                Size = new Size(26, 26),
+                BackColor = Config.BG,
+                Cursor = Cursors.Hand,
+                Tag = "paint"
+            };
+            _areaColorBlock.Paint += (s, e) =>
+            {
+                var g = e.Graphics;
+                using (var bw = new SolidBrush(Color.White)) g.FillRectangle(bw, 0, 0, 26, 26);
+                using (var bg = new SolidBrush(Color.FromArgb(222, 222, 222)))
+                    for (int yy = 0; yy < 26; yy += 8)
+                        for (int xx = ((yy / 8) % 2) * 8; xx < 26; xx += 16)
+                            g.FillRectangle(bg, xx, yy, Math.Min(8, 26 - xx), Math.Min(8, 26 - yy));
+                using (var bc = new SolidBrush(Color.FromArgb(_entryColor))) g.FillRectangle(bc, 0, 0, 26, 26);
+                using (var p = new Pen(Config.Border)) g.DrawRectangle(p, 0, 0, 25, 25);
+            };
+            _areaColorBlock.Click += (s, e) =>
+            {
+                int idx = Array.IndexOf(_areaColors, _entryColor);
+                _entryColor = _areaColors[(idx + 1) % _areaColors.Length];
+                _areaColorBlock.Invalidate();
+                _fnUpdateAreaLbl();   // 换色也实时刷新桌面色块
+            };
+            Tips.Set(_areaColorBlock, I18n.T("area_color"));
+
+            int areaBtnY = AccGroup.HeadH + areaRowY;
+            _areaPickBtn.Location = new Point(_entryGroup.Width - AccGroup.InR - _areaPickBtn.Width, areaBtnY);
+            _areaClearBtn.Location = new Point(_areaPickBtn.Left - _areaClearBtn.Width - 8, areaBtnY);
+            _areaColorBlock.Location = new Point(_areaClearBtn.Left - _areaColorBlock.Width - 8, areaBtnY);
+            _entryGroup.Controls.Add(_areaPickBtn);
+            _entryGroup.Controls.Add(_areaClearBtn);
+            _entryGroup.Controls.Add(_areaColorBlock);
+            _entryGroup.ExpandRow(areaRowY, Math.Max(RowH, 19 + _areaLbl.PreferredHeight + 8));
+            _entryGroup.FinishRows();
+
+
+            // ==== 组 4：排序（默认排序，独立于 TC）====
+            _sortGroup = _fnNewGroup(I18n.T("group_sort"), false);
+            _sortGroup.AddChip("");
+
+            _sortCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font(Config.FontName, 8.5f),
+                Width = 170,
+                Height = 24
+            };
+            _sortCombo.Items.AddRange(new object[] {
+                I18n.T("sort_name") + " ↑", I18n.T("sort_name") + " ↓",
+                I18n.T("sort_size") + " ↑", I18n.T("sort_size") + " ↓",
+                I18n.T("sort_date") + " ↑", I18n.T("sort_date") + " ↓",
+            });
+            string[] sortModes = { "name", "size", "date" };
+            int sortIdx = Array.IndexOf(sortModes, Config.SortMode);
+            if (sortIdx < 0) sortIdx = 0;
+            _sortCombo.SelectedIndex = sortIdx * 2 + (Config.SortDesc ? 1 : 0);
+            _sortCombo.SelectedIndexChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, true); };
+
+            y = 8;
+            y = _sortGroup.AddRow(y, I18n.T("sort_default"), I18n.T("sort_default_desc"), _sortCombo);
+            _sortGroup.FinishRows();
+
+
+            // ==== 组 5：Total Commander 支持（暂停开发）====
+            _tcGroup = _fnNewGroup(I18n.T("group_tc"), false);
+            _tcGroup.AddChip(I18n.T("tag_paused"), true);
 
             _tcSortCombo = new ComboBox
             {
@@ -174,133 +553,60 @@ namespace HoverExplorer
             };
             _tcSortCombo.Items.AddRange(new object[] { "自动 (读 TC ini)", "名称 ↑", "名称 ↓", "日期 ↑", "日期 ↓", "大小 ↑", "大小 ↓", "扩展名 ↑", "扩展名 ↓" });
             _tcSortCombo.SelectedIndex = Config.TcSortMode + 1;
-            y = _fnAddRow(y, I18n.T("tc_sort_row"), I18n.T("tc_sort_disabled"), _tcSortCombo, contentRight);
 
-            _fnAddSep(470);
+            y = 8;
+            y = _tcGroup.AddRow(y, I18n.T("tc_sort_row"), I18n.T("tc_sort_disabled"), _tcSortCombo);
+            _tcGroup.FinishRows();
 
-            // ---- 底部按钮区（确定在左、取消在右）----
-            int btnY = 482;
-            _okBtn = new Button
-            {
-                Text = I18n.T("settings_ok"),
-                Location = new Point(contentRight - 86 - 10 - 86, btnY),
-                Size = new Size(86, 30),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Config.Accent,
-                ForeColor = Color.White,
-                Font = new Font(Config.FontName, 9f)
-            };
-            _okBtn.FlatAppearance.BorderSize = 0;
-            _okBtn.FlatAppearance.MouseOverBackColor = Config.Accent;
-            _okBtn.Click += (s, e) =>
-            {
-                HotkeyEnabled = _hoverToggle.On;
-                HotkeyModifiers = _hoverMods;
-                HotkeyKey = _hoverKey;
-                HoverDelaySetting = _delayStepper.Value;
-                // TC 功能暂停：下拉禁用，保持原值不变（防御式直取 Config 值）
-                TcSortSetting = Config.TcSortMode;
-                CardHotkeyEnabledSetting = _cardToggle.On;
-                CardHotkeyModifiersSetting = _cardMods;
-                CardHotkeyKeySetting = _cardKey;
-                DialogResult = DialogResult.OK;
-                Close();
-            };
-            Controls.Add(_okBtn);
-
-            _cancelBtn = new Button
-            {
-                Text = I18n.T("settings_cancel"),
-                Location = new Point(contentRight - 86, btnY),
-                Size = new Size(86, 30),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Config.BG,
-                ForeColor = Config.FG,
-                Font = new Font(Config.FontName, 9f)
-            };
-            _cancelBtn.FlatAppearance.BorderColor = Config.Border;
-            _cancelBtn.FlatAppearance.MouseOverBackColor = Config.BgHover;
-            _cancelBtn.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
-            Controls.Add(_cancelBtn);
-
-            // ---- 赞赏区（保留）----
+            // ---- "关于"折叠组（赞助/版本，随内容滚动）----
             EventHandler copyWx = (s, e) =>
             {
                 try { Clipboard.SetText("jtugqivi"); MessageBox.Show(I18n.T("donated"), I18n.T("donate"), MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
             };
-            int dy = 524;
+            var aboutGroup = _fnNewGroup(I18n.T("group_about"), false);
+            const int qrSize = 150;
             Image qrImg = null;
-            try
-            {
-                var s = typeof(SettingsForm).Assembly.GetManifestResourceStream("HoverExplorer.donate_qr.png");
-                if (s != null) { qrImg = Image.FromStream(s); }
-            }
-            catch { }
+            try { var s = typeof(SettingsForm).Assembly.GetManifestResourceStream("HoverExplorer.donate_qr.png"); if (s != null) qrImg = Image.FromStream(s); } catch { }
+            int aboutY = 8;
+            int aboutBase = AccGroup.HeadH + aboutY;
             if (qrImg != null)
             {
-                var qr = new PictureBox
-                {
-                    Location = new Point(PadX, dy),
-                    Size = new Size(110, 110),
-                    SizeMode = PictureBoxSizeMode.Zoom,
-                    Image = qrImg,
-                    Cursor = Cursors.Hand,
-                };
+                var qr = new PictureBox { Location = new Point(PadX, aboutBase), Size = new Size(qrSize, qrSize), SizeMode = PictureBoxSizeMode.Zoom, Image = qrImg, Cursor = Cursors.Hand, Visible = false };
                 qr.Click += copyWx;
-                Controls.Add(qr);
+                aboutGroup.Controls.Add(qr);
             }
-            var donateLbl = new LinkLabel
-            {
-                Text = "vx:jtugqivi",
-                Location = new Point(146, dy + 4),
-                AutoSize = true,
-                Font = new Font(Config.FontName, 8.5f),
-                Tag = "sub"
-            };
+            int linkX = PadX + qrSize + 16;
+            var donateLbl = new LinkLabel { Text = "vx:jtugqivi", Location = new Point(linkX, aboutBase + 4), AutoSize = true, Font = new Font(Config.FontName, 8.5f), Tag = "sub", Visible = false };
             donateLbl.Click += copyWx;
-            Controls.Add(donateLbl);
-            Controls.Add(MakeLink("GitHub Releases", 146, dy + 28, "https://github.com/dlsdgj/HoverExplorer/releases"));
-            Controls.Add(MakeLink("百度网盘 (pwd: hbf8)", 146, dy + 52, "https://pan.baidu.com/s/12rp6LTe7Y8oSErvP8wTLgA?pwd=hbf8"));
+            aboutGroup.Controls.Add(donateLbl);
+            var link1 = MakeLink("GitHub Releases", linkX, aboutBase + 28, "https://github.com/dlsdgj/HoverExplorer/releases"); link1.Visible = false; aboutGroup.Controls.Add(link1);
+            var link2 = MakeLink("百度网盘 (pwd: hbf8)", linkX, aboutBase + 52, "https://pan.baidu.com/s/12rp6LTe7Y8oSErvP8wTLgA?pwd=hbf8"); link2.Visible = false; aboutGroup.Controls.Add(link2);
+            _verLbl = new Label { Text = "v" + Program.Version, AutoSize = true, ForeColor = Config.PlaceholderFg, Font = new Font(Config.FontName, 8f), Tag = "sub", Visible = false };
+            _verLbl.Location = new Point(aboutGroup.Width - PadX - 18 - _verLbl.PreferredWidth, aboutBase + qrSize - _verLbl.PreferredHeight);
+            aboutGroup.Controls.Add(_verLbl);
+            aboutGroup.ExpandRow(aboutY + qrSize + 8, 0);
+            aboutGroup.FinishRows();
 
-            // 版本号：右下角弱化
-            _verLbl = new Label
-            {
-                Text = "v" + Program.Version,
-                AutoSize = true,
-                ForeColor = Config.PlaceholderFg,
-                Font = new Font(Config.FontName, 8f),
-                Tag = "sub"
-            };
-            _verLbl.Location = new Point(contentRight - _verLbl.PreferredWidth, dy + 110 - _verLbl.PreferredHeight);
-            Controls.Add(_verLbl);
-
-            // 自绘标题栏关闭按钮
-            _closeBtn = new Label
-            {
-                Text = "×",
-                Size = new Size(28, 24),
-                Location = new Point(Width - 32, 8),
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font(Config.FontName, 11),
-                Cursor = Cursors.Hand
-            };
-            _closeBtn.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
-            _closeBtn.MouseEnter += (s, e) => _closeBtn.BackColor = Config.BgHover;
-            _closeBtn.MouseLeave += (s, e) => _closeBtn.BackColor = Config.BG;
-            Controls.Add(_closeBtn);
-
-            Height = dy + 110 + 24;
-
-            AcceptButton = _okBtn;
-
+            _fnUpdateAreaLbl();
+            _fnRefreshChips();
+            _fnUpdateExpandBtn();
+            _fnSyncScroll();
             ApplyThemeColors();
-            _fnUpdateHoverState();
-            _fnUpdateCardState();
+        }
+
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            _fnSyncScroll();   // 布局稳定后再校一次内容高度（构造期 GetPreferredSize 可能偏小）
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            // 标题栏底色（与组标题同色，拉开与内容区层次）；子控件绘制在其上
+            using (var b = new SolidBrush(Config.BgHover))
+                e.Graphics.FillRectangle(b, 0, 0, Width, HeadAreaH);
             using (var p = new Pen(Config.Border, 1))
                 e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
         }
@@ -313,85 +619,116 @@ namespace HoverExplorer
 
         private void _fnDrag(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left && e.Y <= TitleBarH)
+            if (e.Button == MouseButtons.Left && e.Y <= HeadAreaH)
             {
                 NativeMethods.ReleaseCapture();
                 NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
             }
         }
 
-        // ================= 布局辅助 =================
+        // ================= 手风琴 =================
 
-        private int _fnAddGroup(int y, string text)
+        // 简易输入框（配色方案命名用）
+        private static string PromptName(string title, string defaultName)
         {
-            var l = new Label
+            using (var f = new Form { Text = title, Width = 340, Height = 150, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, BackColor = Config.BG })
             {
-                Text = text,
-                Location = new Point(PadX, y),
-                AutoSize = true,
-                Font = new Font(Config.FontName, 10f, FontStyle.Bold)
-            };
-            Controls.Add(l);
-            return y + 22;
-        }
-
-        private int _fnAddRow(int y, string title, string desc, Control right, int contentRight)
-        {
-            var t = new Label
-            {
-                Text = title,
-                Location = new Point(PadX, y),
-                AutoSize = true,
-                Font = new Font(Config.FontName, 9.5f)
-            };
-            Controls.Add(t);
-            if (!string.IsNullOrEmpty(desc))
-            {
-                var d = new Label
-                {
-                    Text = desc,
-                    Location = new Point(PadX, y + 19),
-                    AutoSize = true,
-                    ForeColor = Config.PlaceholderFg,
-                    Font = new Font(Config.FontName, 8f),
-                    Tag = "sub"
-                };
-                Controls.Add(d);
+                var tb = new TextBox { Text = defaultName, Location = new Point(12, 12), Width = 300, Font = new Font(Config.FontName, 9f), BackColor = Config.BG, ForeColor = Config.FG };
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(236, 44), Width = 76, Height = 26, Font = new Font(Config.FontName, 9f), BackColor = Config.BG, ForeColor = Config.FG, FlatStyle = FlatStyle.Flat };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(154, 44), Width = 76, Height = 26, Font = new Font(Config.FontName, 9f), BackColor = Config.BG, ForeColor = Config.FG, FlatStyle = FlatStyle.Flat };
+                f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(cancel);
+                f.AcceptButton = ok; f.CancelButton = cancel;
+                return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
             }
-            if (right != null)
+        }
+
+        private AccGroup _fnNewGroup(string title, bool open)
+        {
+            int contentW = Width - PadX * 2 - ScrollBarW;   // 右侧预留自绘滚动条
+            var g = new AccGroup(contentW, title, open);
+            g.Margin = new Padding(0, 0, 0, 10);
+            _scrollPanel.Controls.Add(g);
+            _groups.Add(g);
+            g.HeadClicked += (s, e) => _fnToggleGroup(g);
+            return g;
+        }
+
+        // 手风琴单开：点已展开组 = 收起；展开一组 = 收起其余，并滚入视野
+        private void _fnToggleGroup(AccGroup g)
+        {
+            if (g.Open) g.Open = false;
+            else
             {
-                int dy = right.Height <= 22 ? 0 : -2;
-                right.Location = new Point(contentRight - right.Width, y + dy);
-                Controls.Add(right);
+                foreach (var o in _groups) if (o != g) o.Open = false;
+                g.Open = true;
+                _fnScrollIntoView(g);
             }
-            return y + RowH;
+            _fnSyncScroll();
+            _fnUpdateExpandBtn();
         }
 
-        private void _fnAddSep(int y)
+        // ================= 自绘滚动 =================
+
+        // 组高度/视口变化后同步滚动范围（内容层高度补齐，避免 FlowLayoutPanel 裁掉溢出子控件）
+        // 注意：GetPreferredSize(Size(w,0)) 高度约束 0 会返回 0（上版滑块不显示根因），改为直接累加子控件 bounds
+        private void _fnSyncScroll()
         {
-            Controls.Add(new Separator
-            {
-                Location = new Point(PadX, y),
-                Size = new Size(Width - PadX * 2, 1),
-                BackColor = Config.Border
-            });
+            if (_viewport == null || _scrollBar == null) return;
+            _scrollPanel.PerformLayout();   // 组高度变化后先重排（FlowLayoutPanel 布局默认挂起，直接读 bounds 是旧值）
+            int contentH = _scrollPanel.Padding.Top;
+            foreach (Control c in _scrollPanel.Controls)
+                contentH = Math.Max(contentH, c.Bottom + c.Margin.Bottom);
+            int viewH = _viewport.Height;
+            _scrollPanel.Size = new Size(_viewport.Width - ScrollBarW, Math.Max(contentH, viewH));
+            _scrollBar.Maximum = Math.Max(1, contentH);
+            _scrollBar.LargeChange = Math.Max(1, viewH);
+            if (_scrollBar.Value > contentH - viewH) _scrollBar.Value = Math.Max(0, contentH - viewH);
         }
 
-        private Label _fnMakeHint()
+        // 展开的组滚入视野（自绘滚动替代 ScrollControlIntoView）
+        private void _fnScrollIntoView(AccGroup g)
         {
-            return new Label
-            {
-                AutoSize = true,
-                ForeColor = Config.PlaceholderFg,
-                Font = new Font(Config.FontName, 8f),
-                Text = I18n.T("hotkey_click_hint"),
-                Tag = "sub"
-            };
+            int yInView = g.Location.Y - _scrollBar.Value;
+            if (yInView < 0) _scrollBar.Value = g.Location.Y;
+            else if (yInView + g.Height > _viewport.Height)
+                _scrollBar.Value = Math.Max(0, g.Location.Y + g.Height - _viewport.Height);
         }
 
-        private void _fnPlacePill(HotkeyPill pill, int rowY)
+        protected override void OnMouseWheel(MouseEventArgs e)
         {
-            pill.Location = new Point(Width - PadX - pill.Width, rowY - 2);
+            base.OnMouseWheel(e);
+            if (_scrollBar == null || !_scrollBar.Visible) return;
+            var loc = _viewport.PointToClient(Cursor.Position);
+            if (loc.X < 0 || loc.X >= _viewport.Width || loc.Y < 0 || loc.Y >= _viewport.Height) return;
+            _scrollBar.Value -= e.Delta / 120 * 40;
+        }
+
+        private void _fnUpdateExpandBtn()
+        {
+            if (_expandBtn == null) return;
+            bool anyClosed = false;
+            foreach (var g in _groups) if (!g.Open) { anyClosed = true; break; }
+            _expandBtn.Text = anyClosed ? I18n.T("settings_expand") : I18n.T("settings_collapse");
+            _fnPlaceExpandBtn();
+        }
+
+        private void _fnPlaceExpandBtn()
+        {
+            _expandBtn.Location = new Point(_closeBtn.Left - 12 - _expandBtn.Width, 19);
+        }
+
+        // ================= 摘要 chip =================
+
+        private void _fnRefreshChips()
+        {
+            if (_hoverGroup == null || _cardGroup == null || _entryGroup == null || _sortGroup == null) return;
+            if (_hoverPill == null || _cardPill == null || _entryPill == null || _delayStepper == null || _closeDelayStepper == null || _sortCombo == null) return;
+            _hoverGroup.SetChip(0, HotkeyDisplay(_hoverToggle.On, _hoverMods, _hoverKey));
+            _hoverGroup.SetChip(1, string.Format("{0:0.00} {1}", _delayStepper.Value, I18n.T("delay_unit")));
+            _hoverGroup.SetChip(2, _closeDelayStepper.Value + " ms");
+            _cardGroup.SetChip(0, HotkeyDisplay(_cardToggle.On, _cardMods, _cardKey));
+            _entryGroup.SetChip(0, HotkeyDisplay(_entryToggle.On, _entryMods, _entryKey));
+            _sortGroup.SetChip(0, _sortCombo.SelectedIndex >= 0 ? _sortCombo.SelectedItem.ToString() : "");
         }
 
         // ================= 快捷键录制 =================
@@ -401,7 +738,6 @@ namespace HoverExplorer
             _fnStopCapture();
             _hoverRecording = true;
             _hoverPill.Recording = true;
-            _hoverHintLbl.Text = I18n.T("hotkey_esc_cancel");
         }
 
         private void _fnStartCardCapture()
@@ -409,32 +745,119 @@ namespace HoverExplorer
             _fnStopCapture();
             _cardRecording = true;
             _cardPill.Recording = true;
-            _cardHintLbl.Text = I18n.T("hotkey_esc_cancel");
+        }
+
+        private void _fnStartEntryCapture()
+        {
+            _fnStopCapture();
+            _entryRecording = true;
+            _entryPill.Recording = true;
         }
 
         private void _fnStopCapture()
         {
-
             if (_hoverRecording)
             {
                 _hoverRecording = false;
                 _hoverPill.Recording = false;
-                _fnPlacePill(_hoverPill, _hoverPill.Location.Y + 2);
-                _hoverHintLbl.Text = I18n.T("hotkey_click_hint");
+                _fnPlacePill(_hoverPill, _hoverGroup);
             }
             if (_cardRecording)
             {
                 _cardRecording = false;
                 _cardPill.Recording = false;
-                _fnPlacePill(_cardPill, _cardPill.Location.Y + 2);
-                _cardHintLbl.Text = I18n.T("hotkey_click_hint");
+                _fnPlacePill(_cardPill, _cardGroup);
             }
+            if (_entryRecording)
+            {
+                _entryRecording = false;
+                _entryPill.Recording = false;
+                _fnPlacePill(_entryPill, _entryGroup);
+            }
+            _fnRefreshChips();
+        }
+
+        private void _fnPlacePill(HotkeyPill pill, AccGroup g)
+        {
+            if (pill == null || g == null) return;
+            pill.Location = new Point(g.Width - AccGroup.InR - pill.Width, pill.Location.Y);
+        }
+
+        private void _fnPickArea()
+        {
+            // 全屏遮罩框选（Esc 取消）；确定后写 _entryRect 并即时预览显示
+            using (var pick = new AreaPickForm(delegate(Rectangle r) { _entryRect = r; _fnUpdateAreaLbl(); }))
+            {
+                pick.ShowDialog(this);
+            }
+        }
+
+        private void _fnUpdateAreaLbl()
+        {
+            if (_areaLbl == null) return;
+            _areaLbl.Text = _entryRect.Width >= 20
+                ? string.Format(I18n.T("area_fmt"), _entryRect.Width, _entryRect.Height, _entryRect.X, _entryRect.Y)
+                : I18n.T("area_none");
+            if (_entryGroup != null)
+                _entryGroup.SetChip(1, _entryRect.Width >= 20 ? string.Format("{0}×{1}", _entryRect.Width, _entryRect.Height) : "");
+            // 即改即生效：桌面色块先按当前值立即刷新，随后整批写入 Config 并保存
+            Program.UpdateEntryIndicator(_entryRect, _entryColor);
+            _fnApplySettings(false, false);
+        }
+
+        // 即改即生效：把控件当前值整批写入 Config 并提交（无确定/取消按钮，改动实时生效）
+        private void _fnApplySettings(bool hotkeys, bool panels)
+        {
+            Config.HotkeyEnabled = _hoverToggle.On;
+            Config.HotkeyModifiers = _hoverMods;
+            Config.HotkeyKey = _hoverKey;
+            Config.HoverDelay = _delayStepper.Value;
+            Config.CloseDelay = _closeDelayStepper.Value / 1000.0;
+            Config.CardHotkeyEnabled = _cardToggle.On;
+            Config.CardHotkeyModifiers = _cardMods;
+            Config.CardHotkeyKey = _cardKey;
+            Config.KeepOnLeave = _keepToggle.On;
+            Config.RowSwapSides = _rowSwapToggle.On;
+            Config.AltSuppressHover = _altSuppressToggle.On;
+            int sortSel = _sortCombo.SelectedIndex >= 0 ? _sortCombo.SelectedIndex : 0;
+            Config.SortMode = sortSel / 2 == 1 ? "size" : (sortSel / 2 == 2 ? "date" : "name");
+            Config.SortDesc = (sortSel % 2 == 1);
+            Config.EntryHotkeyEnabled = _entryToggle.On;
+            Config.EntryHotkeyModifiers = _entryMods;
+            Config.EntryHotkeyKey = _entryKey;
+            Config.EntryRectX = _entryRect.X;
+            Config.EntryRectY = _entryRect.Y;
+            Config.EntryRectW = _entryRect.Width;
+            Config.EntryRectH = _entryRect.Height;
+            Config.EntryRectColor = _entryColor;
+            Program.ApplySettingsLive(hotkeys, panels);
+        }
+
+        private void _fnUpdateHoverState()
+        {
+            if (_hoverPill == null) return;
+            _hoverPill.Enabled = _hoverToggle.On;
+            _fnRefreshChips();
+        }
+
+        private void _fnUpdateCardState()
+        {
+            if (_cardPill == null) return;
+            _cardPill.Enabled = _cardToggle.On;
+            _fnRefreshChips();
+        }
+
+        private void _fnUpdateEntryState()
+        {
+            if (_entryPill == null) return;
+            _entryPill.Enabled = _entryToggle.On;
+            _fnRefreshChips();
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
             base.OnKeyDown(e);
-            if (_hoverRecording || _cardRecording)
+            if (_hoverRecording || _cardRecording || _entryRecording)
             {
                 e.Handled = true;
                 e.SuppressKeyPress = true;
@@ -445,25 +868,13 @@ namespace HoverExplorer
                 if ((e.Modifiers & Keys.Alt) == Keys.Alt) mods |= NativeMethods.MOD_ALT;
                 if ((e.Modifiers & Keys.Shift) == Keys.Shift) mods |= NativeMethods.MOD_SHIFT;
                 if (_hoverRecording) { _hoverMods = mods; _hoverKey = (int)e.KeyCode; _hoverPill.SetHotkey(mods, (int)e.KeyCode); }
-                else { _cardMods = mods; _cardKey = (int)e.KeyCode; _cardPill.SetHotkey(mods, (int)e.KeyCode); }
+                else if (_cardRecording) { _cardMods = mods; _cardKey = (int)e.KeyCode; _cardPill.SetHotkey(mods, (int)e.KeyCode); }
+                else { _entryMods = mods; _entryKey = (int)e.KeyCode; _entryPill.SetHotkey(mods, (int)e.KeyCode); }
                 _fnStopCapture();
+                _fnApplySettings(true, false);   // 快捷键录制完成即注册生效
                 return;
             }
-            if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); }
-        }
-
-        private void _fnUpdateHoverState()
-        {
-            bool en = _hoverToggle.On;
-            _hoverPill.Enabled = en;
-            _hoverHintLbl.Text = en ? (_hoverRecording ? I18n.T("hotkey_esc_cancel") : I18n.T("hotkey_click_hint")) : I18n.T("hotkey_disabled");
-        }
-
-        private void _fnUpdateCardState()
-        {
-            bool en = _cardToggle.On;
-            _cardPill.Enabled = en;
-            _cardHintLbl.Text = en ? (_cardRecording ? I18n.T("hotkey_esc_cancel") : I18n.T("hotkey_click_hint")) : I18n.T("hotkey_disabled");
+            if (e.KeyCode == Keys.Escape) Close();
         }
 
         // ================= 主题 =================
@@ -478,21 +889,32 @@ namespace HoverExplorer
         {
             BackColor = Config.BG;
             ForeColor = Config.FG;
-            foreach (Control c in Controls)
+            _fnApplyTheme(Controls);
+            if (_expandBtn != null) { _expandBtn.BackColor = Config.BG; _expandBtn.FlatAppearance.BorderColor = Config.Border; _expandBtn.FlatAppearance.MouseOverBackColor = Config.BgHover; _expandBtn.ForeColor = Config.FG; }
+            if (_areaPickBtn != null) { _areaPickBtn.BackColor = Config.Accent; _areaPickBtn.FlatAppearance.MouseOverBackColor = Config.Accent; }
+            if (_areaClearBtn != null) { _areaClearBtn.BackColor = Config.BG; _areaClearBtn.FlatAppearance.BorderColor = Config.Border; _areaClearBtn.FlatAppearance.MouseOverBackColor = Config.BgHover; _areaClearBtn.ForeColor = Config.FG; }
+            if (_verLbl != null) _verLbl.ForeColor = Config.PlaceholderFg;
+            if (_closeBtn != null) { _closeBtn.ForeColor = Config.PlaceholderFg; _closeBtn.BackColor = Config.BG; }
+        }
+
+        private void _fnApplyTheme(Control.ControlCollection coll)
+        {
+            foreach (Control c in coll)
             {
+                if (c is Button) continue;                                  // 尾部统一处理
                 if (c is Separator) { c.BackColor = Config.Border; continue; }
-                if (c is ToggleSwitch || c is HotkeyPill || c is DelayStepper || c is TagLabel) { c.Invalidate(); continue; }
+                if (c is AccGroup) { ((AccGroup)c).ApplyTheme(); continue; }
+                if (c is SlimScrollBar) { c.Invalidate(); continue; }       // 透明底自绘，不覆盖
+                if (c is ToggleSwitch || c is HotkeyPill || c is DelayStepper || c is ChipLabel) { c.Invalidate(); continue; }
                 if (c is ComboBox || c is PictureBox) continue;
+                if ((c.Tag as string) == "paint") { c.Invalidate(); continue; }
                 if ((c.Tag as string) == "sub") { c.ForeColor = Config.PlaceholderFg; continue; }
                 c.BackColor = Config.BG;
                 c.ForeColor = Config.FG;
                 var link = c as LinkLabel;
                 if (link != null) link.LinkColor = Config.Accent;
+                _fnApplyTheme(c.Controls);
             }
-            if (_okBtn != null) { _okBtn.BackColor = Config.Accent; _okBtn.FlatAppearance.MouseOverBackColor = Config.Accent; }
-            if (_cancelBtn != null) { _cancelBtn.FlatAppearance.BorderColor = Config.Border; }
-            if (_verLbl != null) _verLbl.ForeColor = Config.PlaceholderFg;
-            if (_closeBtn != null) { _closeBtn.ForeColor = Config.PlaceholderFg; _closeBtn.BackColor = Config.BG; }
         }
 
         // ================= 静态展示工具（Program.cs 依赖） =================
@@ -522,7 +944,333 @@ namespace HoverExplorer
 
         private class Separator : Panel { }
 
-        // 圆角开关：激活时 Accent 底 + 白色圆滑块
+        // 可视区容器：双缓冲 + 裁切滚动内容层（WinForms 子控件溢出父 bounds 默认被裁剪）
+        private class ViewportPanel : Panel
+        {
+            public ViewportPanel() { DoubleBuffered = true; AutoScroll = false; }
+        }
+
+        // 手风琴分组：标题行（点 + 标题 + chip + 开关 + 箭头）+ 可折叠内容行
+        private class AccGroup : Panel
+        {
+            public const int HeadH = 38;
+            public const int InL = 14;
+            public const int InR = 14;
+
+            private bool _open;
+            private int _contentH;
+            private readonly Panel _head;
+            private readonly DotIcon _dot;
+            private readonly Label _title;
+            private readonly ChevronIcon _chev;
+            private readonly List<ChipLabel> _chips = new List<ChipLabel>();
+            private ToggleSwitch _toggle;
+            public event EventHandler HeadClicked;
+
+            public AccGroup(int width, string title, bool open)
+            {
+                Width = width;
+                Height = HeadH;
+                BackColor = Config.BG;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+                _open = open;
+
+                _head = new Panel
+                {
+                    Location = new Point(1, 1),
+                    Size = new Size(width - 2, HeadH - 1),
+                    BackColor = Config.BgHover,
+                    Cursor = Cursors.Hand
+                };
+                _dot = new DotIcon { Location = new Point(12, 15), Cursor = Cursors.Hand };
+                _title = new Label
+                {
+                    Text = title,
+                    AutoSize = false,
+                    Size = new Size(width - 2 - 25 - 195, HeadH - 4),
+                    Location = new Point(24, 1),
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    AutoEllipsis = true,
+                    Font = new Font(Config.FontName, 10f, FontStyle.Bold),
+                    BackColor = Config.BgHover,
+                    Cursor = Cursors.Hand
+                };
+                _chev = new ChevronIcon { Location = new Point(width - 2 - 13 - 12, 13), Cursor = Cursors.Hand };
+                _head.Controls.Add(_dot);
+                _head.Controls.Add(_title);
+                _head.Controls.Add(_chev);
+                Controls.Add(_head);
+
+                EventHandler click = (s, e) => { if (HeadClicked != null) HeadClicked(this, EventArgs.Empty); };
+                _head.Click += click;
+                _title.Click += click;
+                _dot.Click += click;
+                _chev.Click += click;
+                _dot.Lit = open;
+                _chev.Up = open;
+            }
+
+            public void SetToggle(ToggleSwitch t)
+            {
+                _toggle = t;
+                t.Location = new Point(_chev.Left - 10 - t.Width, (HeadH - t.Height) / 2);
+                _head.Controls.Add(t);
+                PlaceChips();
+            }
+
+            public ChipLabel AddChip(string text)
+            {
+                return AddChip(text, false);
+            }
+
+            public ChipLabel AddChip(string text, bool amber)
+            {
+                var c = new ChipLabel(text, amber);
+                _chips.Add(c);
+                _head.Controls.Add(c);
+                PlaceChips();
+                _fnSyncChips();
+                return c;
+            }
+
+            public void SetChip(int idx, string text)
+            {
+                if (idx < 0 || idx >= _chips.Count) return;
+                var c = _chips[idx];
+                if (string.IsNullOrEmpty(text)) c.SetShown(false);
+                else { c.SetShown(true); c.SetText(text); }
+                PlaceChips();
+                _fnSyncChips();
+            }
+
+            private void PlaceChips()
+            {
+                int rightEdge = (_toggle != null ? _toggle.Left : _chev.Left) - 12;
+                for (int i = _chips.Count - 1; i >= 0; i--)
+                {
+                    var c = _chips[i];
+                    if (!c.Shown) continue;
+                    c.Location = new Point(rightEdge - c.Width, (HeadH - c.Height) / 2);
+                    rightEdge -= c.Width + 5;
+                }
+            }
+
+            private void _fnSyncChips()
+            {
+                foreach (var c in _chips) c.Visible = (!_open) && c.Shown;
+            }
+
+            public bool Open
+            {
+                get { return _open; }
+                set
+                {
+                    if (_open == value) return;
+                    _open = value;
+                    _dot.Lit = value;
+                    _chev.Up = value;
+                    _dot.Invalidate();
+                    _chev.Invalidate();
+                    foreach (Control c in Controls)
+                        if (c != _head) c.Visible = value;
+                    _fnSyncChips();
+                    Height = _open ? HeadH + _contentH : HeadH;
+                    Invalidate();
+                }
+            }
+
+            // 内容行：左标题/描述、右控件；描述限宽自动换行动态撑高
+            public int AddRow(int y, string title, string desc, Control right)
+            {
+                var t = new Label
+                {
+                    Text = title,
+                    Location = new Point(InL, HeadH + y),
+                    AutoSize = true,
+                    Font = new Font(Config.FontName, 9.5f),
+                    Visible = _open
+                };
+                Controls.Add(t);
+                Label d = null;
+                int contentRight = Width - InR;
+                if (!string.IsNullOrEmpty(desc))
+                {
+                    int descRight = right != null ? contentRight - right.Width - 24 : contentRight;
+                    d = new Label
+                    {
+                        Text = desc,
+                        Location = new Point(InL, HeadH + y + 19),
+                        AutoSize = true,
+                        MaximumSize = new Size(Math.Max(160, descRight - InL), 0),
+                        ForeColor = Config.PlaceholderFg,
+                        Font = new Font(Config.FontName, 8f),
+                        Tag = "sub",
+                        Visible = _open
+                    };
+                    Controls.Add(d);
+                }
+                if (right != null)
+                {
+                    int dy = right.Height <= 22 ? 0 : -2;
+                    right.Location = new Point(contentRight - right.Width, HeadH + y + dy);
+                    right.Visible = _open;
+                    Controls.Add(right);
+                }
+                int rowH = d != null ? Math.Max(RowH, 19 + d.PreferredHeight + 8) : RowH;
+                _contentH = Math.Max(_contentH, y + rowH);
+                if (_open) Height = HeadH + _contentH;
+                return y + rowH;
+            }
+
+            // 手动行（自行定位控件）扩展内容高度
+            public void ExpandRow(int y, int rowH)
+            {
+                _contentH = Math.Max(_contentH, y + rowH);
+                if (_open) Height = HeadH + _contentH;
+            }
+
+            public void FinishRows()
+            {
+                _contentH += 10;
+                if (_open) Height = HeadH + _contentH;
+            }
+
+            public void ApplyTheme()
+            {
+                BackColor = Config.BG;
+                _head.BackColor = Config.BgHover;
+                _title.BackColor = Config.BgHover;
+                foreach (Control c in _head.Controls)
+                {
+                    if (c is DotIcon || c is ChevronIcon || c is ChipLabel || c is ToggleSwitch)
+                    {
+                        c.BackColor = Config.BgHover;
+                        c.Invalidate();
+                        continue;
+                    }
+                    // 标题标签必须跟随头部条底色，否则浅色系下出现与头部割裂的白色矩形
+                    if (c == _title) { c.BackColor = Config.BgHover; c.ForeColor = Config.FG; continue; }
+                    c.BackColor = Config.BG;
+                    c.ForeColor = Config.FG;
+                }
+                foreach (Control c in Controls)
+                {
+                    if (c == _head) continue;
+                    if (c is HotkeyPill || c is DelayStepper) { c.Invalidate(); continue; }
+                    if (c is Button || c is ComboBox) continue;
+                    if ((c.Tag as string) == "paint") { c.Invalidate(); continue; }
+                    if ((c.Tag as string) == "sub") { c.ForeColor = Config.PlaceholderFg; continue; }
+                    c.BackColor = Config.BG;
+                    c.ForeColor = Config.FG;
+                }
+                Invalidate();
+            }
+
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                using (var p = new Pen(Config.Border, 1))
+                {
+                    e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+                    if (_open) e.Graphics.DrawLine(p, 1, HeadH, Width - 2, HeadH);
+                }
+            }
+        }
+
+        // 摘要 chip：折叠态显示当前配置（快捷键/延时/排序等）
+        private class ChipLabel : Control
+        {
+            private string _text;
+            private readonly bool _amber;
+            private bool _shown = true;
+
+            public bool Shown { get { return _shown; } }
+
+            public ChipLabel(string text, bool amber)
+            {
+                _text = text;
+                _amber = amber;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+                SetStyle(ControlStyles.Selectable, false);
+                _fnMeasure();
+            }
+
+            public void SetShown(bool v) { _shown = v; }
+
+            public void SetText(string t)
+            {
+                _text = t;
+                _fnMeasure();
+                Invalidate();
+            }
+
+            private void _fnMeasure()
+            {
+                using (var f = new Font(Config.FontName, 8f))
+                {
+                    var sz = TextRenderer.MeasureText(_text, f, Size.Empty, TextFormatFlags.NoPadding);
+                    Size = new Size(sz.Width + 14, 20);
+                }
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                bool dark = Config.Theme != "light";
+                Color bg = _amber ? (dark ? ColorTranslator.FromHtml("#453a15") : ColorTranslator.FromHtml("#fdf0cd")) : Config.BgHover;
+                Color fg = _amber ? (dark ? ColorTranslator.FromHtml("#e5b84f") : ColorTranslator.FromHtml("#a8720a")) : Config.PlaceholderFg;
+                Color border = _amber ? bg : Config.Border;
+                using (var b = new SolidBrush(bg)) g.FillRectangle(b, 0, 0, Width, Height);
+                using (var p = new Pen(border)) g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+                using (var f = new Font(Config.FontName, 8f))
+                    TextRenderer.DrawText(g, _text, f, new Rectangle(0, 0, Width, Height), fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+        }
+
+        // 标题行状态点：展开 = Accent
+        private class DotIcon : Control
+        {
+            public bool Lit;
+
+            public DotIcon()
+            {
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+                SetStyle(ControlStyles.Selectable, false);
+                Size = new Size(8, 8);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                using (var b = new SolidBrush(Lit ? Config.Accent : Config.Border))
+                    e.Graphics.FillEllipse(b, 1, 1, 6, 6);
+            }
+        }
+
+        // 标题行箭头：收起朝下 / 展开朝上
+        private class ChevronIcon : Control
+        {
+            public bool Up;
+
+            public ChevronIcon()
+            {
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+                SetStyle(ControlStyles.Selectable, false);
+                Size = new Size(12, 12);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                using (var p = new Pen(Config.PlaceholderFg, 1.6f))
+                {
+                    if (Up) { g.DrawLine(p, 2, 7, 6, 3); g.DrawLine(p, 6, 3, 10, 7); }
+                    else { g.DrawLine(p, 2, 5, 6, 9); g.DrawLine(p, 6, 9, 10, 5); }
+                }
+            }
+        }
+
+        // 开关：激活时 Accent 底 + 白色滑块
         private class ToggleSwitch : Control
         {
             private bool _on;
@@ -655,10 +1403,19 @@ namespace HoverExplorer
         {
             private double _val = 0.30;
 
+            public event EventHandler ValueChanged;
+
             public double Value
             {
                 get { return _val; }
-                set { _val = Math.Max(0.10, Math.Min(3.00, Math.Round(value, 2))); Invalidate(); }
+                set
+                {
+                    var nv = Math.Max(0.10, Math.Min(3.00, Math.Round(value, 2)));
+                    if (nv == _val) return;
+                    _val = nv;
+                    Invalidate();
+                    if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+                }
             }
 
             public DelayStepper()
@@ -674,8 +1431,6 @@ namespace HoverExplorer
                 base.OnMouseDown(e);
                 if (e.X < 22) Value = _val - 0.05;
                 else if (e.X > Width - 22) Value = _val + 0.05;
-                else return;
-                Invalidate();
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -702,36 +1457,60 @@ namespace HoverExplorer
             }
         }
 
-        // 状态标签：「暂停开发」
-        private class TagLabel : Control
+        // 毫秒步进器：[-] 350 ms [+]，关闭延迟用（秒级粒度太粗，120/350/800ms 是常见档位）
+        private class MsStepper : Control
         {
-            public TagLabel(string text)
+            private int _val = 350;
+
+            public event EventHandler ValueChanged;
+
+            public int Value
+            {
+                get { return _val; }
+                set
+                {
+                    var nv = Math.Max(50, Math.Min(2000, value));
+                    if (nv == _val) return;
+                    _val = nv;
+                    Invalidate();
+                    if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+                }
+            }
+
+            public MsStepper()
             {
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
                 SetStyle(ControlStyles.Selectable, false);
-                using (var f = new Font(Config.FontName, 8f))
-                {
-                    var sz = TextRenderer.MeasureText(text, f, Size.Empty, TextFormatFlags.NoPadding);
-                    Size = new Size(sz.Width + 14, 22);
-                }
-                _text = text;
+                Size = new Size(116, 26);
+                Cursor = Cursors.Hand;
             }
 
-            private readonly string _text;
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+                if (e.X < 22) Value = _val - 50;
+                else if (e.X > Width - 22) Value = _val + 50;
+            }
 
             protected override void OnPaint(PaintEventArgs e)
             {
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                bool dark = Config.Theme != "light";
-                Color bg = dark ? ColorTranslator.FromHtml("#453a15") : ColorTranslator.FromHtml("#fdf0cd");
-                Color fg = dark ? ColorTranslator.FromHtml("#e5b84f") : ColorTranslator.FromHtml("#a8720a");
                 using (var path = _fnRoundRect(0.5f, 0.5f, Width - 1, Height - 1, 4))
-                using (var b = new SolidBrush(bg))
-                    g.FillPath(b, path);
-                using (var f = new Font(Config.FontName, 8f))
                 {
-                    TextRenderer.DrawText(g, _text, f, new Rectangle(0, 0, Width, Height), fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    using (var b = new SolidBrush(Config.BgHover)) g.FillPath(b, path);
+                    using (var p = new Pen(Config.Border)) g.DrawPath(p, path);
+                }
+                using (var f = new Font(Config.FontName, 8.5f))
+                {
+                    TextRenderer.DrawText(g, "−", f, new Rectangle(0, 0, 22, Height), Config.FG, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(g, "+", f, new Rectangle(Width - 22, 0, 22, Height), Config.FG, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    TextRenderer.DrawText(g, _val + " ms", f, new Rectangle(22, 0, Width - 44, Height), Config.FG, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+                using (var p = new Pen(Config.Border))
+                {
+                    g.DrawLine(p, 22, 4, 22, Height - 4);
+                    g.DrawLine(p, Width - 22, 4, Width - 22, Height - 4);
                 }
             }
         }

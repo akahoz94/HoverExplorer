@@ -1,12 +1,28 @@
 # HoverExplorer
-<img width="697" height="453" alt="compressO-PixPin_2026-10-19_05-25-04" src="https://github.com/user-attachments/assets/88e564d5-37a1-4b65-9a81-36abda3f564c" />
 
-<img width="777" height="447" alt="compressO-PixPin_2026-10-19_05-55-30" src="https://github.com/user-attachments/assets/123399b3-d374-46fc-9d19-fc7ec9bbdc01" />
-
+![HoverExplorer](images/1_cover.png)
 
 鼠标悬停即可浏览文件夹内容与预览文件，无需点击打开。
 
 > Hover to browse folder contents and preview files — no clicks needed.
+
+## 界面预览
+
+**文件列表面板** —— 悬停桌面/资源管理器文件夹即时弹出；触发区域可自定义，半透明色块实时预览
+
+![文件列表面板](images/2_layout.png)
+
+**收藏·历史列表** —— 桌面触发区或 `Ctrl+Shift+E` 热键呼出，行首星标一键收藏/取消
+
+![收藏·历史列表](images/3_favorites.png)
+
+**桌面卡片** —— 文件钉成桌面浮动卡片，卡片上滚轮切换 11 套配色（逐张独立记忆）
+
+![桌面卡片配色](images/4_ai_colors.png)
+
+**音频波形播放器** —— Media Foundation 后台解码整段文件生成峰值/RMS 波形，波形即进度，点击/拖动跳转
+
+![音频波形播放器](images/5_waveform.png)
 
 ## 功能
 

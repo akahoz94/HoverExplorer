@@ -50,7 +50,7 @@ namespace HoverExplorer
                 return;
             }
             mciSendString("set " + _alias + " time format milliseconds", null, 0, IntPtr.Zero);
-            _total = TimeSpan.FromMilliseconds(Math.Max(0, SendInt("status " + _alias + " length")));
+            _total = ProbeLength(path, SendInt("status " + _alias + " length"));
             _opened = true;
             var o = Opened; if (o != null) { try { o(); } catch { } }
             var e = EstimateReady; if (e != null) { try { e(_total.TotalMilliseconds); } catch { } }
@@ -75,6 +75,28 @@ namespace HoverExplorer
         {
             var sb = new StringBuilder(64);
             return mciSendString(cmd, sb, 64, IntPtr.Zero) == 0 ? ToInt(sb.ToString()) : 0;
+        }
+
+        // MCI 的 mpegvideo 驱动不读 Xing VBR 头，按"首帧码率×文件大小"估算时长——
+        // LAME 的 Xing 帧是 64k 静默帧，VBR 文件时长会被高估数倍（如 5 分钟报成 16 分钟）。
+        // 用 EstimateDurationMs（Xing 精确帧数 / CBR 按码率）交叉校验，偏差 >8% 采信解析值
+        private static TimeSpan ProbeLength(string path, int mciMs)
+        {
+            try
+            {
+                double? est = MediaPreview.EstimateDurationMs(path);
+                if (est.HasValue && est.Value > 0)
+                {
+                    if (mciMs <= 0) return TimeSpan.FromMilliseconds(est.Value);
+                    if (Math.Abs(mciMs - est.Value) / est.Value > 0.08)
+                    {
+                        Program.DebugLog("[audio] mci length " + mciMs + "ms 不可信，改用解析值 " + est.Value + "ms " + MediaPreview.TruncPath(path));
+                        return TimeSpan.FromMilliseconds(est.Value);
+                    }
+                }
+            }
+            catch { }
+            return TimeSpan.FromMilliseconds(Math.Max(0, mciMs));
         }
 
         private static int ToInt(string s)
@@ -129,7 +151,7 @@ namespace HoverExplorer
             if (mciSendString("open \"" + path + "\" type mpegvideo alias " + _alias, sb, 64, IntPtr.Zero) == 0)
             {
                 mciSendString("set " + _alias + " time format milliseconds", null, 0, IntPtr.Zero);
-                _total = TimeSpan.FromMilliseconds(Math.Max(0, SendInt("status " + _alias + " length")));
+                _total = ProbeLength(path, SendInt("status " + _alias + " length"));
                 _opened = true;
                 var o = Opened; if (o != null) { try { o(); } catch { } }
                 Play();

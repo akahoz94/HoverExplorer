@@ -301,15 +301,45 @@ namespace HoverExplorer
         public int RowIndex;
         public float SizeRatio;
         public float SizeColW;
+        // 序号叠加：指针悬停某行时在该行图标位显示 1 起行号（与行内操作按钮同生共死），
+        // 移开行即恢复图标。只改绘制层：名称/搜索/中间省略/图标缓存都不受影响
+        public bool ShowIndex;
+
+        // 序号字体：固定 Courier New（等宽，与行字体区分便于扫读行号），
+        // 比行字体小一号半（3 位数也要塞进 16~20px 图标槽），按字号缓存
+        private static Font _idxFont;
+        private static float _idxFontSize;
+        private static Font IndexFont()
+        {
+            float sz = Math.Max(6f, Config.FontSize - 1.5f);
+            if (_idxFont == null || _idxFontSize != sz)
+            {
+                if (_idxFont != null) _idxFont.Dispose();
+                _idxFont = new Font("Courier New", sz);
+                _idxFontSize = sz;
+            }
+            return _idxFont;
+        }
+
+        // 图标位画序号（左对齐 20px 槽；淡色=ListMu 与大小文字同层级）
+        private void DrawIndex(Graphics g, int x)
+        {
+            var r = new Rectangle(x, 0, 20, Height);
+            TextRenderer.DrawText(g, (RowIndex + 1).ToString(), IndexFont(), r, Config.ListMu,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
 
         // 名称单行中间省略："前半…后半"（Finder 风格，左 60% 右 40%），二分找最大保留字符数
+        // 测量与行绘制统一走 TextRenderer（GDI），保证"量出来放得下 = 画出来放得下"
         internal static string MidEllipsis(Graphics g, string s, Font f, float maxW)
         {
             if (string.IsNullOrEmpty(s)) return s;
-            var sf = StringFormat.GenericTypographic;
-            if (g.MeasureString(s, f, int.MaxValue, sf).Width <= maxW) return s;
+            Func<string, float> measure = t => TextRenderer.MeasureText(g, t, f,
+                new Size(int.MaxValue, int.MaxValue),
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+            if (measure(s) <= maxW) return s;
             const string ell = "…";
-            float ellW = g.MeasureString(ell, f, int.MaxValue, sf).Width;
+            float ellW = measure(ell);
             if (maxW <= ellW) return ell;
             Func<int, string> build = delegate(int k)
             {
@@ -324,7 +354,7 @@ namespace HoverExplorer
             while (lo <= hi)
             {
                 int mid = (lo + hi) / 2;
-                if (g.MeasureString(build(mid), f, int.MaxValue, sf).Width <= maxW) { best = mid; lo = mid + 1; }
+                if (measure(build(mid)) <= maxW) { best = mid; lo = mid + 1; }
                 else hi = mid - 1;
             }
             return best > 0 ? build(best) : ell;
@@ -353,16 +383,17 @@ namespace HoverExplorer
                 }
                 if (!string.IsNullOrEmpty(SizeText))
                 {
-                    var tsS = g.MeasureString(SizeText, Font);
-                    float yS = Height > 30 ? 3 : (Height - tsS.Height) / 2f;
-                    using (var b = new SolidBrush(Config.ListMu))
-                        g.DrawString(SizeText, Font, b, PadEdge, yS);
+                    // TextRenderer 垂直居中：与图标/序号的几何中心对齐（GDI+ DrawString 行距含内部留白会偏低）
+                    var rcS = new Rectangle(PadEdge, 0, Math.Max(0, SplitX - 2 - PadEdge), Height);
+                    TextRenderer.DrawText(g, SizeText, Font, rcS, Config.ListMu,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
                 }
                 if (!string.IsNullOrEmpty(Name))
                 {
                     // 图标紧贴分隔线右侧，名称自图标右侧起单行排布，放不下中间省略
                     float textX = split + 3;
-                    if (Icon != null)
+                    if (ShowIndex) { DrawIndex(g, split + 1); textX = split + 3 + 16 + 3; }
+                    else if (Icon != null)
                     {
                         g.DrawImage(Icon, split + 3, (Height - Icon.Height) / 2);
                         textX = split + 3 + Icon.Width + 3;
@@ -370,15 +401,15 @@ namespace HoverExplorer
                     float maxW = Width - 6 - textX;
                     if (maxW > 8)
                     {
-                        var sf = StringFormat.GenericTypographic;
-                        float lh = Font.GetHeight(g);
-                        using (var b = new SolidBrush(ForeColor))
-                            g.DrawString(MidEllipsis(g, Name, Font, maxW), Font, b, textX, (Height - lh) / 2, sf);
+                        var rc = new Rectangle((int)textX, 0, (int)maxW, Height);
+                        TextRenderer.DrawText(g, MidEllipsis(g, Name, Font, maxW), Font, rc, ForeColor,
+                            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
                     }
                 }
                 return;
             }
-            if (Icon != null)
+            if (ShowIndex) DrawIndex(e.Graphics, 2);
+            else if (Icon != null)
                 e.Graphics.DrawImage(Icon, 4, (Height - Icon.Height) / 2);
             // 大小背景条（文件，文件夹不画）：自右缘内缩 PadEdge 向左延伸
             if (!IsDir && SizeRatio > 0 && SizeColW > 0)
@@ -390,12 +421,10 @@ namespace HoverExplorer
             }
             if (!string.IsNullOrEmpty(SizeText))
             {
-                bool multi = Height > 30;
-                var ts = e.Graphics.MeasureString(SizeText, Font);
-                float x = Width - PadEdge - ts.Width;
-                float y = multi ? 3 : (Height - ts.Height) / 2f;
-                using (var b = new SolidBrush(Config.ListMu))
-                    e.Graphics.DrawString(SizeText, Font, b, x, y);
+                // TextRenderer 垂直居中：与图标/序号/名称的几何中心对齐
+                var rcS = new Rectangle(0, 0, Width - PadEdge, Height);
+                TextRenderer.DrawText(e.Graphics, SizeText, Font, rcS, Config.ListMu,
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
             }
             // 名称单行显示、过长时中间省略（Label 文本会换行，故走自绘）
             if (!string.IsNullOrEmpty(Name))
@@ -404,10 +433,9 @@ namespace HoverExplorer
                 float maxW = Width - Padding.Left - Padding.Right; // 右侧留大小文本列
                 if (maxW > 8)
                 {
-                    float lh = Font.GetHeight(e.Graphics);
-                    using (var b = new SolidBrush(ForeColor))
-                        e.Graphics.DrawString(MidEllipsis(e.Graphics, Name, Font, maxW), Font, b,
-                            textX, (Height - lh) / 2, StringFormat.GenericTypographic);
+                    var rc = new Rectangle((int)textX, 0, (int)maxW, Height);
+                    TextRenderer.DrawText(e.Graphics, MidEllipsis(e.Graphics, Name, Font, maxW), Font, rc, ForeColor,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
                 }
             }
         }
@@ -2069,13 +2097,31 @@ namespace HoverExplorer
                 var rtb = _content as RichTextBox;
                 if (rtb != null && !string.IsNullOrEmpty(FilePath))
                 {
-                    System.IO.File.WriteAllText(FilePath, rtb.Text);
+                    System.IO.File.WriteAllText(FilePath, rtb.Text, DetectFileEncoding(FilePath));
                     _textDirty = false;
                     _saveBtn.Visible = false;
                     UpdateToolbarBtnPos();
                 }
             }
             catch { }
+        }
+
+        // 按原文件 BOM 决定写回编码：UTF-8(BOM)/UTF-16/UTF-32 原样保留，无 BOM 维持 UTF-8 无 BOM。
+        // 否则 UTF-8(BOM) 文件被改成无 BOM 后，AHK 等按系统内码解析的程序会把中文读成乱码
+        private static System.Text.Encoding DetectFileEncoding(string path)
+        {
+            try
+            {
+                var head = new byte[4];
+                int n;
+                using (var fs = File.OpenRead(path)) n = fs.Read(head, 0, 4);
+                if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) return new System.Text.UTF8Encoding(true);
+                if (n >= 4 && head[0] == 0xFF && head[1] == 0xFE && head[2] == 0 && head[3] == 0) return System.Text.Encoding.UTF32;
+                if (n >= 2 && head[0] == 0xFF && head[1] == 0xFE) return System.Text.Encoding.Unicode;
+                if (n >= 2 && head[0] == 0xFE && head[1] == 0xFF) return System.Text.Encoding.BigEndianUnicode;
+            }
+            catch { }
+            return new System.Text.UTF8Encoding(false);
         }
     }
 
@@ -2517,6 +2563,8 @@ namespace HoverExplorer
             MouseEventHandler drag = (s, e) =>
             {
                 if (e.Button != MouseButtons.Left) return;
+                // 双击顶部操作栏 = 资源管理器打开当前文件夹（手动判定，见 _fnHeaderDoubleClick）
+                if (_fnHeaderDoubleClick()) { _fnOpenInExplorer(); return; }
                 var before = Location;
                 NativeMethods.ReleaseCapture(); NativeMethods.SendMessage(Handle, 0xA1, 0x2, 0);
                 if (Location != before && !_pinned) TogglePinPopup();
@@ -2616,11 +2664,19 @@ namespace HoverExplorer
                     Size = new Size(Math.Max(40, _panelW - 12 - 24), 18),
                 };
                 var titleDown = new Point(int.MinValue, int.MinValue);
-                _titleLbl.MouseDown += (s, e) => titleDown = e.Location;
+                bool titleDbl = false;   // 手动双击已触发：随后的抬起不再走单击复制路径
+                _titleLbl.MouseDown += (s, e) =>
+                {
+                    titleDown = e.Location;
+                    // 双击标题 = 打开文件夹（手动判定：e.Clicks 受单击复制等时序影响不可靠）
+                    if (e.Button == MouseButtons.Left && _fnHeaderDoubleClick()) { titleDbl = true; _fnOpenInExplorer(); }
+                };
                 // 点击粗体文件夹名 = 复制路径（拖动面板后不误触发）；重命名走右侧 ✎ 按钮
                 _titleLbl.MouseUp += (s, e) =>
                 {
                     if (e.Button != MouseButtons.Left) return;
+                    if (titleDbl) { titleDbl = false; return; }   // 双击的第二次抬起：不再复制路径
+                    if (e.Clicks >= 2) return;
                     if (Math.Abs(e.Location.X - titleDown.X) > 3 || Math.Abs(e.Location.Y - titleDown.Y) > 3) return;
                     try { Clipboard.SetText(path); ShowToast(I18n.T("copied")); } catch { }
                 };
@@ -3407,6 +3463,7 @@ namespace HoverExplorer
                 if (_rowCopyBtn != null) _rowCopyBtn.Visible = false;
                 if (_rowPinBtn != null) _rowPinBtn.Visible = false;
                 if (_rowRenameBtn != null) _rowRenameBtn.Visible = false;
+                _fnClearRowIndex();
                 return;
             }
             // 搜索框展开 = 键盘输入态：扫行不弹子列表/预览（会抢走输入流），点击照常
@@ -3416,8 +3473,13 @@ namespace HoverExplorer
                 if (_rowCopyBtn != null) _rowCopyBtn.Visible = false;
                 if (_rowPinBtn != null) _rowPinBtn.Visible = false;
                 if (_rowRenameBtn != null) _rowRenameBtn.Visible = false;
+                _fnClearRowIndex();
                 return;
             }
+            // 序号叠加：与行内操作按钮同生共死——只显示当前悬停行的行号，先清掉残留行
+            _fnClearRowIndex();
+            row.ShowIndex = true;
+            row.Invalidate();
             row.BackColor = Config.ListHv;
             // 按钮组紧贴排列（18px 步进无间距）：重命名·复制·钉卡片·删除；
             // 互换布局时整组贴左缘（del·pin·copy·rename 从左往右），与大小文本同侧。
@@ -3501,6 +3563,8 @@ namespace HoverExplorer
                 if (_rowCopyBtn != null) _rowCopyBtn.Visible = false;
                 if (_rowPinBtn != null) _rowPinBtn.Visible = false;
                 if (_rowRenameBtn != null) _rowRenameBtn.Visible = false;
+                // 序号与按钮组同生共死：整组隐藏时序号一并消失（移到按钮组上则保留）
+                if (row.ShowIndex) { row.ShowIndex = false; row.Invalidate(); }
             }
             if (row == _activeDirRow) row.BackColor = Config.ListHv;
             else if (row == _contextRow) row.BackColor = Config.ListHv;  // 右键期间保持悬停高亮不被 OnRowLeave 擦除
@@ -4620,6 +4684,64 @@ namespace HoverExplorer
             if (!IsHandleCreated || IsDisposed || !Visible) return false;
             var p = PointToClient(new Point(screenX, screenY));
             return p.X >= 0 && p.X < ClientSize.Width && p.Y >= 0 && p.Y < _headH;
+        }
+
+        // ---- 拖拽滚轮 / 翻页键路由入口（由 Program 低级钩子按指针位置调用）----
+        // 指针是否落在列表行区（含细滚动条）：拖拽滚轮只在行区滚动，操作栏滚轮仍是配色切换
+        public bool ListRectContains(int x, int y)
+        {
+            if (_listPanel == null || IsDisposed || !Visible) return false;
+            var r = _listPanel.RectangleToScreen(_listPanel.ClientRectangle);
+            return x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom;
+        }
+
+        // ---- 序号叠加：行悬停时在该行图标位显示 1 起序号（与行内操作按钮同生共死）----
+        // 清掉所有行的序号显示（进入守卫分支/离开行时调用，防止残留）
+        private void _fnClearRowIndex()
+        {
+            foreach (var r in _rows)
+                if (!r.IsDisposed && r.ShowIndex) { r.ShowIndex = false; r.Invalidate(); }
+        }
+
+        // 双击顶部操作栏：资源管理器打开当前面板所在文件夹（子面板各自打开自己的目录）
+        // 手动双击判定：首击会进模态拖动（ReleaseCapture+HTCAPTION 移动循环会吞掉首个抬起），
+        // 系统双击时序被打乱、e.Clicks 经常到不了 2——自行按系统双击时间/范围判定
+        private int _hdrLastDownTick;
+        private Point _hdrLastDownPos;
+        private bool _fnHeaderDoubleClick()
+        {
+            int now = Environment.TickCount;
+            var pt = Cursor.Position;
+            bool dbl = _hdrLastDownTick != 0
+                && now - _hdrLastDownTick >= 0 && now - _hdrLastDownTick < SystemInformation.DoubleClickTime
+                && Math.Abs(pt.X - _hdrLastDownPos.X) <= SystemInformation.DoubleClickSize.Width / 2
+                && Math.Abs(pt.Y - _hdrLastDownPos.Y) <= SystemInformation.DoubleClickSize.Height / 2;
+            // 触发后清零：三连击不会连续触发两次"双击"
+            _hdrLastDownTick = dbl ? 0 : now;
+            _hdrLastDownPos = pt;
+            return dbl;
+        }
+
+        private void _fnOpenInExplorer()
+        {
+            if (string.IsNullOrEmpty(_path) || !Directory.Exists(_path)) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_path) { UseShellExecute = true }); }
+            catch (Exception ex) { Program.DebugLog("[panel] header-open fail " + _path + " " + ex.Message); }
+        }
+
+        // OLE 拖拽中滚轮滚动列表：拖拽循环截走 WM_MOUSEWHEEL，OnMouseWheel 收不到，
+        // 由 WH_MOUSE_LL 钩子转发，步长与 OnMouseWheel 一致（一格约三行，行高≈24）
+        public void ScrollByWheel(int delta)
+        {
+            if (_listPanel == null || IsDisposed) return;
+            _listPanel.ScrollBy(-(delta / 120) * 72);
+        }
+
+        // 翻页键（PageUp/PageDown）：一页 = 列表可视高减一行，保留上下文
+        public void PageKey(int dir)
+        {
+            if (_listPanel == null || IsDisposed) return;
+            _listPanel.ScrollBy(dir * Math.Max(24, _listPanel.Height - 24));
         }
 
         // 由 Program.ListWheelFilter 调用（面板是非激活窗口，收不到自己的 WM_MOUSEWHEEL）

@@ -13,7 +13,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.8.4";
+        public const string Version = "1.0.8.5";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -476,6 +476,109 @@ namespace HoverExplorer
 
         private static IPaletteTarget _wheelCard;   // 最近一次正在滚轮调色的卡片（桌面卡/收藏·历史卡）
 
+        // ---- 拖拽滚轮 / 翻页键：低级钩子（按需装/卸，Tick 每轮同步）----
+        // 面板是不抢前台的未激活窗口：OLE 拖拽中滚轮消息被拖拽循环截走，键盘焦点又始终在
+        // 前台窗口——IMessageFilter 只能过滤本线程消息，两种输入都到不了面板，
+        // 只能挂 WH_MOUSE_LL / WH_KEYBOARD_LL 按指针位置路由。钩子不常驻：
+        // 拖拽会话（左键按住≥400ms+移动10px）才挂鼠标钩子、面板可见才挂键盘钩子
+        private static IntPtr _mouseHook;
+        private static NativeMethods.HookProc _mouseHookProc;
+        private static IntPtr _kbHook;
+        private static NativeMethods.HookProc _kbHookProc;
+
+        private static void SyncMouseHook(bool want)
+        {
+            if (want && _mouseHook == IntPtr.Zero)
+            {
+                if (_mouseHookProc == null) _mouseHookProc = MouseHookProc;
+                _mouseHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _mouseHookProc,
+                    NativeMethods.GetModuleHandle(null), 0);
+                DebugLog("[hook] mouse hook " + (_mouseHook != IntPtr.Zero ? "installed" : "install fail"));
+            }
+            else if (!want && _mouseHook != IntPtr.Zero)
+            {
+                NativeMethods.UnhookWindowsHookEx(_mouseHook);
+                _mouseHook = IntPtr.Zero;
+                DebugLog("[hook] mouse hook removed");
+            }
+        }
+
+        private static IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && wParam.ToInt32() == NativeMethods.WM_MOUSEWHEEL)
+            {
+                var hs = (NativeMethods.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(NativeMethods.MSLLHOOKSTRUCT));
+                int delta = (short)((hs.mouseData >> 16) & 0xFFFF);
+                if (RouteDragWheel(hs.pt.X, hs.pt.Y, delta)) return (IntPtr)1;   // 已滚列表：吃掉，不穿透到下层窗口
+            }
+            return NativeMethods.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
+
+        // 滚轮路由到指针下的最顶层面板列表行区；收藏·历史列表（自适应高度无滚动）与预览窗不参与
+        private static bool RouteDragWheel(int x, int y, int delta)
+        {
+            for (int i = _panels.Count - 1; i >= 0; i--)
+            {
+                var p = _panels[i];
+                if (p == null || p.IsDisposed || !p.Visible) continue;
+                if (!p.ListRectContains(x, y)) continue;
+                p.ScrollByWheel(delta);
+                return true;
+            }
+            return false;
+        }
+
+        private static void SyncKeyboardHook(bool want)
+        {
+            if (want && _kbHook == IntPtr.Zero)
+            {
+                if (_kbHookProc == null) _kbHookProc = KeyboardHookProc;
+                _kbHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _kbHookProc,
+                    NativeMethods.GetModuleHandle(null), 0);
+                DebugLog("[hook] keyboard hook " + (_kbHook != IntPtr.Zero ? "installed" : "install fail"));
+            }
+            else if (!want && _kbHook != IntPtr.Zero)
+            {
+                NativeMethods.UnhookWindowsHookEx(_kbHook);
+                _kbHook = IntPtr.Zero;
+                DebugLog("[hook] keyboard hook removed");
+            }
+        }
+
+        private static IntPtr KeyboardHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && (wParam.ToInt32() == NativeMethods.WM_KEYDOWN || wParam.ToInt32() == NativeMethods.WM_SYSKEYDOWN))
+            {
+                var hs = (NativeMethods.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(NativeMethods.KBDLLHOOKSTRUCT));
+                if (hs.vkCode == NativeMethods.VK_PRIOR || hs.vkCode == NativeMethods.VK_NEXT)
+                {
+                    // 仅裸翻页键：带 Ctrl/Alt/Shift 的组合留给前台应用
+                    bool mod = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0
+                        || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0
+                        || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
+                    if (!mod && RoutePageKey(hs.vkCode == NativeMethods.VK_NEXT ? 1 : -1)) return (IntPtr)1;
+                }
+            }
+            return NativeMethods.CallNextHookEx(_kbHook, nCode, wParam, lParam);
+        }
+
+        // 翻页键路由：指针压在哪个面板上就翻哪个（最顶层优先）；不在面板上不拦截，
+        // 前台应用（Explorer 等）的翻页不受影响
+        private static bool RoutePageKey(int dir)
+        {
+            NativeMethods.POINT pt;
+            NativeMethods.GetCursorPos(out pt);
+            for (int i = _panels.Count - 1; i >= 0; i--)
+            {
+                var p = _panels[i];
+                if (p == null || p.IsDisposed || !p.Visible) continue;
+                if (!p.ContainsPoint(pt.X, pt.Y)) continue;
+                p.PageKey(dir);
+                return true;
+            }
+            return false;
+        }
+
         private static void AdjustCardPalette(IPaletteTarget card, int dir, Rectangle anchor)
         {
             int idx;
@@ -769,6 +872,7 @@ namespace HoverExplorer
             }
             try { _notifyIcon.ShowBalloonTip(800, "HoverExplorer", _hoverEnabled ? I18n.T("hover_enabled") : I18n.T("hover_disabled"), ToolTipIcon.Info); } catch { }
             ShowStatusToast(_hoverEnabled ? I18n.T("hover_enabled") : I18n.T("hover_disabled"), _hoverEnabled);
+            UpdatePauseIndicator();   // 触控区色块随开关状态换色（绿=启用 / 红=已暂停）
         }
 
         private static StatusToastForm _statusToast;
@@ -870,6 +974,17 @@ namespace HoverExplorer
             // 捕获健康检查放在所有提前 return 之前：即使菜单打开/悬停已关闭也要自愈，
             // 否则一旦捕获残留，点击被路由到卡片，用户连操作入口都点不到
             ReleaseStuckCaptures();
+            // 钩子同步放在所有提前 return 之前：暂停/菜单等分支也要能卸载，钩子不能常驻。
+            // 鼠标钩子 = 拖拽会话中且左键仍按住（会话标志在下方更新，这里按松键兜底卸载）；
+            // 键盘钩子 = 任一面板可见
+            SyncMouseHook(_dragSessionActive && (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0);
+            bool anyPanelVis = false;
+            for (int i = _panels.Count - 1; i >= 0; i--)
+            {
+                var p = _panels[i];
+                if (p != null && !p.IsDisposed && p.Visible) { anyPanelVis = true; break; }
+            }
+            SyncKeyboardHook(anyPanelVis);
             bool menuOpen = ShellMenuOpen || IsSystemMenuOpen();
             // shell 原生菜单模态期间 WM_TIMER 照常派发（Tick 仍在跑）：
             // 此期间任何 SetWindowPos 提顶都可能把卡片/面板提到菜单上面 → 菜单被盖、点击失效。
@@ -1356,7 +1471,8 @@ namespace HoverExplorer
 
         private static EntryIndicatorForm _pauseIndicator;
 
-        // 暂停触控区的桌面标识块：红色半透明，与触发区蓝色块区分
+        // 暂停触控区的桌面标识块：双色表达悬停开关状态——绿色=悬停启用、红色=已暂停，
+        // 与触发区蓝色块区分；状态切换（托盘/热键/驻留触控区）时由 ToggleHoverEnabled 刷新
         internal static void UpdatePauseIndicator()
         {
             bool active = Config.PauseRectW >= 5 && Config.PauseRectH >= 5;
@@ -1374,7 +1490,8 @@ namespace HoverExplorer
                 _pauseIndicator = new EntryIndicatorForm();
                 _pauseIndicator.Show();
             }
-            _pauseIndicator.Apply(new Rectangle(Config.PauseRectX, Config.PauseRectY, Config.PauseRectW, Config.PauseRectH), 0x28D05555);
+            int argb = _hoverEnabled ? 0x283BBE6B : 0x28D05555;
+            _pauseIndicator.Apply(new Rectangle(Config.PauseRectX, Config.PauseRectY, Config.PauseRectW, Config.PauseRectH), argb);
         }
 
         // 弹出 收藏·历史 列表（触发区域悬停 / 全局热键 / 拖拽进入）
@@ -1453,9 +1570,11 @@ namespace HoverExplorer
             if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
             var exist = _panels.FirstOrDefault(p => !p.IsDisposed && !p.Pinned && p.Level == 0);
             if (exist != null && exist.CurrentPath == path) return;
-            var nonPinned = _panels.Where(p => !p.Pinned).ToList();
+            // 拖拽源面板（行拖出进行中）不能关：关掉会 Dispose 正在 DoDragDrop 的行，中断拖放
+            //（与 ShowEntryList 的清场豁免同一语义）
+            var nonPinned = _panels.Where(p => !p.Pinned && !p.IsDragging).ToList();
             foreach (var p in nonPinned) p.ClosePanel();
-            _panels.RemoveAll(p => !p.Pinned);
+            _panels.RemoveAll(p => !p.Pinned && !p.IsDragging);
             var p2 = new PopupForm(0, OpenSub, DropResolver, ScheduleCloseAfter);
             if (p2.ShowPanel(path, rowRightTop.X + 6, rowRightTop.Y - 4))
             {

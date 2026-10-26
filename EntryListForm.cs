@@ -33,6 +33,8 @@ namespace HoverExplorer
         private Timer _rowHoverTimer;     // 行悬停 400ms → 右侧弹子列表
         private string _rowHoverPath;
         private EntryRow _rowHoverRow;
+        private Timer _dragSubTimer;      // 拖拽悬停文件夹 ~500ms → 弹簧式打开级联子列表
+        private EntryRow _dragSubRow;
 
         protected override bool ShowWithoutActivation { get { return true; } }
 
@@ -56,6 +58,8 @@ namespace HoverExplorer
             KeyDown += (s, e) =>
             {
                 if (e.KeyCode != Keys.Escape) return;
+                // 行内重命名中：Esc 只取消改名，不关列表
+                if (_rowEdit != null) { e.SuppressKeyPress = true; _fnEndEntryRename(false); return; }
                 // Esc 主动关闭后区域内不再重弹（否则鼠标停在触发区时 HoverDelay 后又弹回来）；
                 // 移出区域再回来即恢复武装
                 Program._entryArmed = false;
@@ -255,8 +259,12 @@ namespace HoverExplorer
             row.MouseClick += delegate(object s, MouseEventArgs e)
             {
                 if (e.Button != MouseButtons.Left) return;
+                // 先取坐标：RecordRecent 重排会重建整表（当前行随之 Dispose），
+                // 事后再调 row.PointToScreen 会对已释放控件抛异常，被全局 ThreadException
+                // 吞掉 → Process.Start 根本不执行（"点击闪一下且打不开文件夹"的根因）
+                var pt = row.PointToScreen(Point.Empty);
                 RecordRecent(path);
-                _onOpenFolder(path, row.PointToScreen(Point.Empty));
+                _onOpenFolder(path, pt);
                 Close();
             };
             row.MouseUp += delegate(object s, MouseEventArgs e)
@@ -272,6 +280,8 @@ namespace HoverExplorer
                 {
                     e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
                     row.BackColor = Config.ListDrop;
+                    // 拖到行上瞬间停掉残留的行悬停级联调度，避免子列表弹在拖拽路径上
+                    _fnStopRowHover();
                 }
             };
             row.DragOver += delegate(object s, DragEventArgs e)
@@ -279,14 +289,33 @@ namespace HoverExplorer
                 e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop)
                     ? ((e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy)
                     : DragDropEffects.None;
+                _fnScheduleDragSub(row);
             };
-            row.DragLeave += delegate { if (!_fnRowContains(row)) row.BackColor = row.BaseColor; };
+            row.DragLeave += delegate
+            {
+                _fnCancelDragSub(row);
+                if (!_fnRowContains(row)) row.BackColor = row.BaseColor;
+            };
             row.DragDrop += delegate(object s, DragEventArgs e)
             {
+                _fnCancelDragSub();
                 row.BackColor = row.BaseColor;
                 var files = e.Data.GetData(DataFormats.FileDrop) as string[];
                 Program.DropFilesIntoEntryFolder(path, files, (e.KeyState & 4) != 0);
             };
+            // ---- 行悬停操作按钮（与文件列表行一致，无删除）：重命名 · 复制路径 · 固定为桌面卡片 ----
+            row.BtnHover += delegate(object s, bool inBtn)
+            {
+                // 按钮上悬停不触发行级联子列表（与星标同语义：弹出会盖住按钮本意）
+                if (inBtn) _fnStopRowHover();
+                else if (_rowHoverPath == path) _fnStartRowHover(row);
+            };
+            row.CopyClicked += delegate
+            {
+                try { Clipboard.SetText(path); _fnToast(I18n.T("copied")); } catch { }
+            };
+            row.PinClicked += delegate { Program.TogglePin(path); };
+            row.RenameClicked += delegate { _fnBeginEntryRename(row); };
             Controls.Add(row);
             _rows.Add(row);
             return y + 26;
@@ -339,6 +368,91 @@ namespace HoverExplorer
             Config.Save();
         }
 
+        // ---- 行内重命名（与文件列表行同语义）：Enter 提交、Esc 取消、失焦提交 ----
+        private TextBox _rowEdit;
+        private EntryRow _rowEditRow;
+
+        private void _fnBeginEntryRename(EntryRow row)
+        {
+            if (row == null || _rowEdit != null) return;
+            _fnStopRowHover();
+            _fnCancelDragSub();
+            var tb = new TextBox
+            {
+                Font = row.Font,
+                BackColor = Config.ListBg,
+                ForeColor = Config.ListFg,
+                BorderStyle = BorderStyle.FixedSingle,
+                Location = row.Location,
+                Size = new Size(row.Width, Math.Max(22, row.Height)),
+                Text = row.Name,
+            };
+            _rowEdit = tb;
+            _rowEditRow = row;
+            row.Visible = false;
+            Controls.Add(tb);
+            tb.BringToFront();
+            tb.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Return) { e.SuppressKeyPress = true; _fnEndEntryRename(true); }
+                else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; _fnEndEntryRename(false); }
+            };
+            tb.LostFocus += (s, e) => { if (_rowEdit == tb) _fnEndEntryRename(true); };
+            // 列表不抢前台，编辑要主动激活才能收到键盘（与文件列表行改名一致）
+            if (!Focused) Activate();
+            tb.Focus();
+            tb.SelectAll();
+        }
+
+        private void _fnEndEntryRename(bool commit)
+        {
+            if (_rowEdit == null) return;
+            var box = _rowEdit;
+            _rowEdit = null;
+            var row = _rowEditRow;
+            _rowEditRow = null;
+            string nn = commit ? box.Text.Trim() : "";
+            try { Controls.Remove(box); box.Dispose(); } catch { }
+            if (row != null && !row.IsDisposed) row.Visible = true;
+            if (!commit || row == null || row.IsDisposed) return;
+            string full = row.Full;
+            if (string.IsNullOrEmpty(nn) || string.Equals(nn, Path.GetFileName(full), StringComparison.Ordinal)) return;
+            // RenamePath：校验非法字符/重名 + Directory.Move + 同步固定卡片路径 + 刷新相关面板
+            if (PopupForm.RenamePath(full, nn))
+            {
+                string newPath = Path.Combine(Path.GetDirectoryName(full), nn);
+                // 收藏/历史存的是完整路径：旧路径全部替换（RenamePath 只同步 PinnedItems）
+                for (int i = 0; i < Config.FavoriteFolders.Count; i++)
+                    if (string.Equals(Config.FavoriteFolders[i], full, StringComparison.OrdinalIgnoreCase)) Config.FavoriteFolders[i] = newPath;
+                for (int i = 0; i < Config.RecentFolders.Count; i++)
+                    if (string.Equals(Config.RecentFolders[i], full, StringComparison.OrdinalIgnoreCase)) Config.RecentFolders[i] = newPath;
+                Config.Save();
+                _fnBuildRows();
+            }
+            else { try { System.Media.SystemSounds.Beep.Play(); } catch { } }
+        }
+
+        // 轻提示（复制路径等）：小浮层居中于列表顶部，800ms 自关（与文件面板 ShowToast 同款）
+        private void _fnToast(string msg)
+        {
+            var t = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                StartPosition = FormStartPosition.Manual,
+                ShowInTaskbar = false,
+                TopMost = true,
+                BackColor = Config.BG,
+                Size = new Size(70, 22),
+            };
+            var lbl = new Label { Text = msg, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Config.FG, BackColor = Config.BG, Font = new Font("Microsoft YaHei", 9) };
+            t.Controls.Add(lbl);
+            t.Location = new Point(Left + (Width - t.Width) / 2, Top + 34);
+            t.Show();
+            var tm = new Timer { Interval = 800 };
+            tm.Tick += (s, e) => { tm.Stop(); tm.Dispose(); t.Close(); t.Dispose(); };
+            tm.Start();
+        }
+
         private bool _fnRowContains(Control c)
         {
             var pt = c.PointToClient(Cursor.Position);
@@ -370,6 +484,34 @@ namespace HoverExplorer
         {
             if (_rowHoverTimer != null) _rowHoverTimer.Stop();
             _rowHoverRow = null;
+        }
+
+        // ---- 拖拽悬停文件夹（弹簧式）：OLE 拖拽期间 MouseEnter/MouseMove 不触发，
+        // 常规行悬停调度失效，由 DragOver 自行调度——拖停 ~500ms 后打开该文件夹的级联
+        // 子列表（与文件列表行同语义），可在子列表里继续逐层导航后放置。
+        // 列表自身保持依赖 _watchTimer 的拖拽豁免（左键按住不自动关闭）
+        private void _fnScheduleDragSub(EntryRow row)
+        {
+            if (_dragSubRow == row && _dragSubTimer != null) return;   // 该行已在计时
+            _fnCancelDragSub();
+            _dragSubRow = row;
+            _dragSubTimer = new Timer { Interval = 500 };
+            _dragSubTimer.Tick += delegate
+            {
+                var t = _dragSubTimer; t.Stop(); t.Dispose(); _dragSubTimer = null;
+                var r = _dragSubRow; _dragSubRow = null;
+                if (r == null || r.IsDisposed || IsDisposed) return;
+                var sp = r.PointToScreen(Point.Empty);
+                Program.ShowEntrySubList(new Point(sp.X + r.Width, sp.Y), r.Full);
+            };
+            _dragSubTimer.Start();
+        }
+
+        private void _fnCancelDragSub(EntryRow row = null)
+        {
+            if (row != null && _dragSubRow != row) return;   // 已移到另一行：保留那行的调度
+            if (_dragSubTimer != null) { _dragSubTimer.Stop(); _dragSubTimer.Dispose(); _dragSubTimer = null; }
+            _dragSubRow = null;
         }
 
         // 数据变更/语言/主题切换 → 开着的列表实时重建（行重排+表头文本图标全刷新）
@@ -449,6 +591,8 @@ namespace HoverExplorer
                 {
                     if (!Visible) { _watchTimer.Stop(); return; }
                     if (_pinned) return;   // 固定后不自动关（与文件列表图钉一致）
+                    // 行内重命名中不自动关：鼠标可能移开列表，焦点在编辑框
+                    if (_rowEdit != null) { missSince = 0; return; }
                     // 拖拽会话中（左键按住，含 OLE 拖放途经）：列表是放置目标，鼠标不在列表上也保持
                     if ((NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0) { missSince = 0; return; }
                     bool inside = _fnListContainsCursor();
@@ -496,6 +640,10 @@ namespace HoverExplorer
             if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
             bool exists = Config.RecentFolders.Contains(path, StringComparer.OrdinalIgnoreCase);
             if (exists && !reorder) return;
+            // 已在顶部且未超上限 = 完全无变化：不写盘不重建。此前点击行会经历两次
+            // Save+NotifyChanged（行点击一次、OpenFolderInExplorer 再一次），整表连闪两次
+            if (exists && string.Equals(Config.RecentFolders[0], path, StringComparison.OrdinalIgnoreCase)
+                && Config.RecentFolders.Count <= Config.EntryRecentMax) return;
             if (!exists || !string.Equals(Config.RecentFolders[0], path, StringComparison.OrdinalIgnoreCase))
             {
                 Config.RecentFolders.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
@@ -511,6 +659,8 @@ namespace HoverExplorer
         {
             if (_watchTimer != null) { _watchTimer.Stop(); _watchTimer.Dispose(); _watchTimer = null; }
             if (_rowHoverTimer != null) { _rowHoverTimer.Stop(); _rowHoverTimer.Dispose(); _rowHoverTimer = null; }
+            if (_dragSubTimer != null) { _dragSubTimer.Stop(); _dragSubTimer.Dispose(); _dragSubTimer = null; _dragSubRow = null; }
+            if (_rowEdit != null) { try { _rowEdit.Dispose(); } catch { } _rowEdit = null; _rowEditRow = null; }
             if (_current == this) _current = null;
             base.OnFormClosed(e);
         }
@@ -680,7 +830,8 @@ namespace HoverExplorer
     }
 
     // 列表行：图标 | ★收藏星标（恒在最前，可点击）| 文件夹名；路径尾已移除。
-    // 斑马底色存 BaseColor（悬停/拖放还原用），配色取文件列表调色板
+    // 斑马底色存 BaseColor（悬停/拖放还原用），配色取文件列表调色板。
+    // 行悬停右端显示操作按钮组（与文件列表行一致，无删除）：重命名 · 复制路径 · 固定为桌面卡片
     internal class EntryRow : Control
     {
         public string Full;
@@ -690,17 +841,63 @@ namespace HoverExplorer
         public Color BaseColor;
         public event EventHandler StarToggled;
         public event EventHandler<bool> StarHover;
+        public event EventHandler CopyClicked;
+        public event EventHandler PinClicked;
+        public event EventHandler RenameClicked;
+        public event EventHandler<bool> BtnHover;   // 进入按钮区 = 抑制行级联子列表调度
 
         private bool _inStar;
         private static readonly Color StarLit = ColorTranslator.FromHtml("#f0b429");
+        private readonly Label _btnRename, _btnCopy, _btnPin;
 
         public EntryRow()
         {
             // 不用 OptimizedDoubleBuffer：同上，BufferedGraphics 在首次弹出有 AV 崩溃记录，行面积小直绘无碍
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true);
+            _btnRename = _fnMakeBtn(PreviewForm.EditIcon(Config.ListFg), I18n.T("rename"));
+            _btnCopy = _fnMakeBtn(PreviewForm.CopyIcon(Config.ListFg), I18n.T("copy_path"));
+            _btnPin = _fnMakeBtn(PreviewForm.PinLaunchIcon(false, Config.ListFg), I18n.T("tip_pin_card"));
+            _btnRename.Click += delegate { var h = RenameClicked; if (h != null) h(this, EventArgs.Empty); };
+            _btnCopy.Click += delegate { var h = CopyClicked; if (h != null) h(this, EventArgs.Empty); };
+            _btnPin.Click += delegate { var h = PinClicked; if (h != null) h(this, EventArgs.Empty); };
+        }
+
+        // 按钮创建：18×18 贴行右缘排布（重命名·复制·固定），悬停由行级 OnMouseEnter 统一显隐
+        private Label _fnMakeBtn(Image img, string tip)
+        {
+            var b = new Label
+            {
+                Size = new Size(18, 18),
+                Location = new Point(-40, 3),
+                Image = img,
+                BackColor = Config.ListHv,
+                Cursor = Cursors.Hand,
+                Visible = false,
+            };
+            b.MouseEnter += delegate { var h = BtnHover; if (h != null) h(this, true); };
+            b.MouseLeave += delegate { var h = BtnHover; if (h != null) h(this, false); };
+            Tips.Set(b, tip);
+            Controls.Add(b);
+            return b;
         }
 
         private Rectangle StarRect { get { return new Rectangle(24, 0, 20, Height); } }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (_btnPin != null) _btnPin.Left = Width - 20;
+            if (_btnCopy != null) _btnCopy.Left = Width - 40;
+            if (_btnRename != null) _btnRename.Left = Width - 60;
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            base.OnMouseEnter(e);
+            // 按钮底色取当前行底（悬停高亮 ListHv），与行浑然一体
+            foreach (var b in new[] { _btnRename, _btnCopy, _btnPin }) b.BackColor = BackColor;
+            foreach (var b in new[] { _btnRename, _btnCopy, _btnPin }) b.Visible = true;
+        }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
@@ -716,11 +913,25 @@ namespace HoverExplorer
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
+            // 移到子按钮上父级同样收到 MouseLeave（子控件是独立窗口）：光标仍在按钮区内整组保留
+            if (!_fnCursorOnButtons())
+                foreach (var b in new[] { _btnRename, _btnCopy, _btnPin }) b.Visible = false;
             if (!_inStar) return;
             _inStar = false;
             var h = StarHover;
             if (h != null) h(this, false);
             Invalidate();
+        }
+
+        private bool _fnCursorOnButtons()
+        {
+            var pt = Cursor.Position;
+            foreach (var b in new[] { _btnRename, _btnCopy, _btnPin })
+            {
+                if (b == null || !b.Visible) continue;
+                if (b.RectangleToScreen(b.ClientRectangle).Contains(pt)) return true;
+            }
+            return false;
         }
 
         protected override void OnMouseClick(MouseEventArgs e)
@@ -746,14 +957,12 @@ namespace HoverExplorer
             TextRenderer.DrawText(g, IsFav ? "★" : "☆", sf, StarRect, starColor,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             // 名称限制在行宽内，过长中间省略（与文件列表一致），不再溢出/撑宽
+            // TextRenderer 垂直居中：与图标/星标的几何中心对齐（GDI+ DrawString 行距含内部留白会偏低）
             float availW = Width - 46 - 6;
-            using (var b = new SolidBrush(ForeColor))
-            {
-                if (availW > 20)
-                    g.DrawString(RowLabel.MidEllipsis(g, Name, Font, availW), Font, b, 46, (Height - Font.Height) / 2);
-                else
-                    g.DrawString(Name, Font, b, 46, (Height - Font.Height) / 2);
-            }
+            var rcName = new Rectangle(46, 0, Math.Max(0, (int)availW), Height);
+            TextRenderer.DrawText(g, availW > 20 ? RowLabel.MidEllipsis(g, Name, Font, availW) : Name, Font,
+                rcName, ForeColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
         }
     }
 
@@ -864,13 +1073,26 @@ namespace HoverExplorer
                     using (var b = new SolidBrush(Color.FromArgb(60, Config.Accent)))
                         e.Graphics.FillRectangle(b, _rect);
                 }
+                // 实时尺寸：跟随光标显示 宽 × 高（框选触发区/暂停区时即所见区域大小）
+                string sz = _rect.Width + " × " + _rect.Height;
+                using (var f = new Font(Config.FontName, 9, FontStyle.Bold))
+                {
+                    var msz = e.Graphics.MeasureString(sz, f);
+                    var lp = PointToClient(Cursor.Position);
+                    float tx = Math.Min(lp.X + 14, Width - msz.Width - 8);
+                    float ty = Math.Min(lp.Y + 18, Height - msz.Height - 6);
+                    using (var b = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
+                        e.Graphics.FillRectangle(b, tx - 3, ty - 2, msz.Width + 6, msz.Height + 3);
+                    using (var b = new SolidBrush(Color.White))
+                        e.Graphics.DrawString(sz, f, b, tx, ty);
+                }
             }
             using (var b = new SolidBrush(Color.White))
             {
                 var tip = I18n.T("area_pick") + "  ·  Esc";
                 var f = new Font(Config.FontName, 11);
-                var sz = e.Graphics.MeasureString(tip, f);
-                e.Graphics.DrawString(tip, f, b, (Width - sz.Width) / 2, Height / 2 - sz.Height);
+                var sz2 = e.Graphics.MeasureString(tip, f);
+                e.Graphics.DrawString(tip, f, b, (Width - sz2.Width) / 2, Height / 2 - sz2.Height);
             }
         }
     }

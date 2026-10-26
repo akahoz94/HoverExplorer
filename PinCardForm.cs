@@ -32,6 +32,7 @@ namespace HoverExplorer
         private Timer _textPreviewTimer;
         private Timer _textHoverTimer;   // 预览开着时轮询：鼠标离开卡片∪预览且未在编辑 → 关（与文件预览行为一致）
         private Timer _badgeTimer;       // 徽章悬停计时：文件夹→弹列表 / 可预览文件→弹预览
+        private Timer _badgeDragTimer;   // 拖拽悬停徽标 ~400ms → 弹簧展开文件夹列表
         private PreviewForm _filePreview; // file 卡徽章悬停弹出的内容预览
         private Timer _fileHoverTimer;   // 该预览的轮询关闭
         private Timer _panelWatchTimer;  // 卡片弹出的文件夹列表轮询：鼠标离开 卡片∪面板 → 收起
@@ -228,18 +229,71 @@ namespace HoverExplorer
                 if (_textHoverTimer != null) { _textHoverTimer.Stop(); _textHoverTimer.Dispose(); _textHoverTimer = null; }
                 _fnCloseTextPreview();
                 if (_badgeTimer != null) { _badgeTimer.Stop(); _badgeTimer.Dispose(); _badgeTimer = null; }
+                if (_badgeDragTimer != null) { _badgeDragTimer.Stop(); _badgeDragTimer.Dispose(); _badgeDragTimer = null; }
                 if (_fileHoverTimer != null) { _fileHoverTimer.Stop(); _fileHoverTimer.Dispose(); _fileHoverTimer = null; }
                 if (_panelWatchTimer != null) { _panelWatchTimer.Stop(); _panelWatchTimer.Dispose(); _panelWatchTimer = null; }
                 _fnCloseFilePreview();
             };
 
             // 文件夹卡片：接受拖入的文件/目录，复制(默认)或移动(Shift)进该文件夹
-            // 子控件会挡住 form 的拖放事件，需对每个子控件单独启用 AllowDrop
+            // 子控件会挡住 form 的拖放事件，需对每个子控件单独启用 AllowDrop；
+            // 徽标例外 = 弹簧展开入口：拖文件停在徽标上 ~400ms 弹出该文件夹列表，
+            // 可继续拖进列表行/更深层子文件夹放置，徽标本身仍可直接落下（进本文件夹）
             if (_isDir)
             {
                 _fnEnableDrop(this);
-                foreach (Control c in Controls) _fnEnableDrop(c);
+                foreach (Control c in Controls)
+                {
+                    if (c == _extBadge) _fnEnableBadgeDragExpand();
+                    else _fnEnableDrop(c);
+                }
             }
+        }
+
+        // 徽标拖放 = 弹簧展开：DragOver 自行调度（OLE 拖拽期间 MouseEnter 不触发），
+        // 拖停 ~400ms 调 _fnOpenFolderList（ShowCardFolderList 内部对已开同目录列表幂等）
+        private void _fnEnableBadgeDragExpand()
+        {
+            _extBadge.AllowDrop = true;
+            _extBadge.DragEnter += (s, e) =>
+            {
+                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                _fnScheduleBadgeDragOpen();
+            };
+            _extBadge.DragOver += (s, e) =>
+            {
+                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                _fnScheduleBadgeDragOpen();
+            };
+            _extBadge.DragLeave += (s, e) => _fnCancelBadgeDragOpen();
+            _extBadge.DragDrop += (s, e) => { _fnCancelBadgeDragOpen(); _fnHandleDrop(e); };
+        }
+
+        private void _fnScheduleBadgeDragOpen()
+        {
+            if (_badgeDragTimer == null)
+            {
+                _badgeDragTimer = new Timer { Interval = 400 };
+                _badgeDragTimer.Tick += (s, e) =>
+                {
+                    _badgeDragTimer.Stop();
+                    if (IsDisposed || !_isDir) return;
+                    _fnOpenFolderList();
+                };
+            }
+            if (_badgeDragTimer.Enabled) return;   // 该徽标已在计时（DragOver 连发不重置）
+            _badgeDragTimer.Stop();
+            _badgeDragTimer.Start();
+        }
+
+        private void _fnCancelBadgeDragOpen()
+        {
+            if (_badgeDragTimer == null) return;
+            _badgeDragTimer.Stop();
+            _badgeDragTimer.Dispose();
+            _badgeDragTimer = null;
         }
 
         // 释放拖动捕获。除 MouseUp 正常路径外，Program 的 Tick 健康检查也会调用：

@@ -26,11 +26,22 @@ namespace HoverExplorer
         private int _listW = 340;
         private int _headerH = 26;
         private int _fullH = 60;
+        // 行区/表头左右内缩与底部留白：与 PopupForm 一致，不顶到面板左右边缘与底边，
+        // 与深色配色下圆角描边（同背景色）视觉协调
+        private const int ListPadLr = 6;
+        private const int ListPadBottom = 6;
         private Timer _rowHoverTimer;     // 行悬停 400ms → 右侧弹子列表
         private string _rowHoverPath;
         private EntryRow _rowHoverRow;
 
         protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // 与面板/预览一致：暗色标题区 + DWM 圆角（Win11）+ 投影
+            Win11.Apply(Handle, Config.Theme != "light", Config.Border);
+        }
 
         public EntryListForm(Action<string, Point> onOpenFolder)
         {
@@ -40,7 +51,7 @@ namespace HoverExplorer
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             BackColor = Config.ListCanvas;   // 配色跟随文件列表（画布底）
-            DoubleBuffered = true;
+            DoubleBuffered = false;   // 双缓冲绘制在首次弹出时偶发 BufferedGraphics AV 崩溃（进程退出），改直绘
             KeyPreview = true;
             KeyDown += (s, e) =>
             {
@@ -57,7 +68,7 @@ namespace HoverExplorer
         // ---- 表头：拖动固定 + 图钉 + 折叠为卡片 ----
         private void _fnBuildHeader()
         {
-            _headPanel = new Panel { BackColor = Config.ListHdbg, Location = new Point(0, 0), Size = new Size(_listW, _headerH) };
+            _headPanel = new Panel { BackColor = Config.ListHdbg, Location = new Point(ListPadLr, 0), Size = new Size(_listW - ListPadLr * 2, _headerH) };
             // 实际拖动后才固定；单纯点击不固定（与文件列表表头一致）
             MouseEventHandler drag = (s, e) =>
             {
@@ -77,7 +88,7 @@ namespace HoverExplorer
                 AutoEllipsis = true,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Location = new Point(6, 3),
-                Size = new Size(_listW - 58, 20),
+                Size = new Size(_headPanel.Width - 58, 20),
                 Cursor = Cursors.Hand,
             };
             Tips.Set(_titleLbl, I18n.T("entry_tip"));
@@ -92,7 +103,7 @@ namespace HoverExplorer
                 BackColor = Config.ListHdbg,
                 Image = PreviewForm.PinIcon(false),
                 Cursor = Cursors.Hand,
-                Location = new Point(_listW - 46, 4),
+                Location = new Point(_headPanel.Width - 46, 4),
             };
             Tips.Set(_pinBtn, I18n.T("tip_pin_panel"));
             _pinBtn.Click += (s, e) => _fnTogglePin();
@@ -106,7 +117,7 @@ namespace HoverExplorer
                 BackColor = Config.ListHdbg,
                 Image = PreviewForm.PinLaunchIcon(false),
                 Cursor = Cursors.Hand,
-                Location = new Point(_listW - 24, 4),
+                Location = new Point(_headPanel.Width - 24, 4),
             };
             _foldBtn.Click += (s, e) => Program.CollapseEntryToCard(Left, Top);
             Tips.Set(_foldBtn, I18n.T("fold_card"));
@@ -157,7 +168,7 @@ namespace HoverExplorer
                 var empty = new Label
                 {
                     Text = I18n.T("entry_empty"),
-                    Location = new Point(10, y),
+                    Location = new Point(ListPadLr + 4, y),
                     AutoSize = true,
                     ForeColor = Config.ListMu,
                     Font = subFont,
@@ -171,22 +182,22 @@ namespace HoverExplorer
             if (recent.Count > 0) y = _fnAddSection(y, I18n.T("sec_recent"));
             foreach (var p in recent) y = _fnAddRow(y, p, false, font, subFont, zebra++);
 
-            _fullH = y + 6;
+            _fullH = y + ListPadBottom;
             // 表头容器与按钮位置同步新宽度：Panel 裁切溢出子控件，
             // 只挪按钮不挪容器会把图钉/折叠裁没（长路径撑宽后按钮消失的根因）
             if (_headPanel != null)
             {
-                _headPanel.Size = new Size(_listW, _headerH);
+                _headPanel.Size = new Size(_listW - ListPadLr * 2, _headerH);
                 _headPanel.BackColor = Config.ListHdbg;
             }
             if (_titleLbl != null)
             {
-                _titleLbl.Width = _listW - 58;
+                _titleLbl.Width = _headPanel.Width - 58;
                 _titleLbl.BackColor = Config.ListHdbg;
                 _titleLbl.ForeColor = Config.ListFg;
             }
-            if (_pinBtn != null) { _pinBtn.Location = new Point(_listW - 46, 4); _pinBtn.BackColor = Config.ListHdbg; }
-            if (_foldBtn != null) { _foldBtn.Location = new Point(_listW - 24, 4); _foldBtn.BackColor = Config.ListHdbg; }
+            if (_pinBtn != null) { _pinBtn.Location = new Point(_headPanel.Width - 46, 4); _pinBtn.BackColor = Config.ListHdbg; }
+            if (_foldBtn != null) { _foldBtn.Location = new Point(_headPanel.Width - 24, 4); _foldBtn.BackColor = Config.ListHdbg; }
             ClientSize = new Size(_listW, _fullH);
         }
 
@@ -195,8 +206,8 @@ namespace HoverExplorer
             var l = new Label
             {
                 Text = title,
-                Location = new Point(8, y),
-                Size = new Size(_listW - 16, 16),
+                Location = new Point(ListPadLr + 2, y),
+                Size = new Size(_listW - ListPadLr * 2 - 4, 16),
                 ForeColor = Config.ListMu,
                 Font = new Font(Config.FontName, Config.FontSize - 1f, FontStyle.Bold),
                 BackColor = Config.ListCanvas,
@@ -213,8 +224,8 @@ namespace HoverExplorer
             {
                 Full = path,
                 IsFav = isFav,
-                Location = new Point(2, y),
-                Size = new Size(_listW - 4, 24),
+                Location = new Point(ListPadLr, y),
+                Size = new Size(_listW - ListPadLr * 2, 24),
                 Font = font,
                 BackColor = baseColor,
                 BaseColor = baseColor,
@@ -367,6 +378,8 @@ namespace HoverExplorer
             if (_current == null || _current.IsDisposed) return;
             var f = _current;
             f._fnBuildRows();
+            // 配色/主题切换后窗口已存在，主动重算并重画非客户区描边，否则边框卡在旧色
+            try { Win11.RefreshNc(f.Handle); } catch { }
             try
             {
                 // 表头文本/提示随语言刷新；图标重取——主题切换 ClearUiIconCache 后
@@ -382,8 +395,23 @@ namespace HoverExplorer
         }
 
         // 右缘拖宽：NCHITTEST 返回 HTRIGHT 交给系统原生改宽；拖完按新宽重建行并记忆
+        // 圆角模式（WindowCorners=1）下 WndNcBorder 的 WM_NCCALCSIZE 把客户区四周内缩
+        // FramePad 像素，WinForms 的 ClientSize 并不知情：写入补描边占位、读取返回真实客户区，
+        // 让四边留白与圆角描边协调（与 PopupForm 一致）；直角模式 FramePad=0 无影响
+        public new Size ClientSize
+        {
+            get
+            {
+                var s = IsHandleCreated ? Win11.RealClient(Handle) : Size.Empty;
+                return s.IsEmpty ? base.ClientSize : s;
+            }
+            set { base.ClientSize = new Size(value.Width + Win11.FramePad * 2, value.Height + Win11.FramePad * 2); }
+        }
+
         protected override void WndProc(ref Message m)
         {
+            // 圆角描边与自身背景同色：亮色描边压在深色配色上很突兀，同色后只剩 DWM 圆角外形
+            if (Win11.WndNcBorder(Handle, ref m, () => BackColor)) return;
             if (m.Msg == 0x84)   // WM_NCHITTEST
             {
                 var lp = m.LParam.ToInt64();
@@ -457,13 +485,22 @@ namespace HoverExplorer
             return pt.X >= 0 && pt.X < Width && pt.Y >= 0 && pt.Y < Height;
         }
 
-        public static void RecordRecent(string path)
+        public static void RecordRecent(string path) { RecordRecent(path, true); }
+
+        // reorder=false（Explorer 轮询每 2.5s 调用）：路径已在历史中就完全跳过——
+        // 之前每个已存在的路径都被移到顶部并触发整表重建+写盘，多窗口时每轮轮询
+        // 连续重建数次，列表无缓冲直接画 → “每隔几秒闪烁几次”的根因。
+        // 真正访问（点击行打开）仍走 reorder=true 置顶
+        public static void RecordRecent(string path, bool reorder)
         {
             if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
-            // 已在历史顶部的路径跳过（Explorer 轮询每 2.5s 调一次，不重复写盘/重排）
-            if (Config.RecentFolders.Count > 0 && string.Equals(Config.RecentFolders[0], path, StringComparison.OrdinalIgnoreCase)) return;
-            Config.RecentFolders.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
-            Config.RecentFolders.Insert(0, path);
+            bool exists = Config.RecentFolders.Contains(path, StringComparer.OrdinalIgnoreCase);
+            if (exists && !reorder) return;
+            if (!exists || !string.Equals(Config.RecentFolders[0], path, StringComparison.OrdinalIgnoreCase))
+            {
+                Config.RecentFolders.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+                Config.RecentFolders.Insert(0, path);
+            }
             if (Config.RecentFolders.Count > Config.EntryRecentMax)
                 Config.RecentFolders.RemoveRange(Config.EntryRecentMax, Config.RecentFolders.Count - Config.EntryRecentMax);
             Config.Save();
@@ -659,7 +696,8 @@ namespace HoverExplorer
 
         public EntryRow()
         {
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            // 不用 OptimizedDoubleBuffer：同上，BufferedGraphics 在首次弹出有 AV 崩溃记录，行面积小直绘无碍
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true);
         }
 
         private Rectangle StarRect { get { return new Rectangle(24, 0, 20, Height); } }
@@ -707,8 +745,15 @@ namespace HoverExplorer
             var starColor = IsFav ? StarLit : (_inStar ? Config.ListFg : Config.ListMu);
             TextRenderer.DrawText(g, IsFav ? "★" : "☆", sf, StarRect, starColor,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            // 名称限制在行宽内，过长中间省略（与文件列表一致），不再溢出/撑宽
+            float availW = Width - 46 - 6;
             using (var b = new SolidBrush(ForeColor))
-                g.DrawString(Name, Font, b, 46, (Height - Font.Height) / 2);
+            {
+                if (availW > 20)
+                    g.DrawString(RowLabel.MidEllipsis(g, Name, Font, availW), Font, b, 46, (Height - Font.Height) / 2);
+                else
+                    g.DrawString(Name, Font, b, 46, (Height - Font.Height) / 2);
+            }
         }
     }
 

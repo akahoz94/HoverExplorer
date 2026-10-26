@@ -42,10 +42,16 @@ namespace HoverExplorer
         private HotkeyPill _entryPill;
         private DelayStepper _delayStepper;
         private MsStepper _closeDelayStepper;
+        private MsStepper _entryDelayStepper;
+
+        private ComboBox _cornerCombo;
         private ComboBox _tcSortCombo;
         private ComboBox _sortCombo;
         private Label _areaLbl;
         private Button _areaPickBtn;
+        private Button _pausePickBtn;
+        private Button _pauseClearBtn;
+        private Label _pauseRectLbl;
         private Button _areaClearBtn;
         private Panel _areaColorBlock;
         private int _entryColor;
@@ -232,6 +238,11 @@ namespace HoverExplorer
             _closeDelayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
             y = _hoverGroup.AddRow(y, I18n.T("close_delay_row"), I18n.T("close_delay_desc"), _closeDelayStepper);
 
+            // 触发区域（收藏·历史入口）独立的悬停延时，不随文件夹悬停延时联动
+            _entryDelayStepper = new MsStepper { Value = Config.EntryRectDelayMs };
+            _entryDelayStepper.ValueChanged += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("entry_delay_row"), I18n.T("entry_delay_desc"), _entryDelayStepper);
+
             _keepToggle = new ToggleSwitch { On = Config.KeepOnLeave };
             _keepToggle.Toggled += (s, e) => _fnApplySettings(false, false);
             y = _hoverGroup.AddRow(y, I18n.T("keep_open"), I18n.T("keep_open_desc"), _keepToggle);
@@ -244,6 +255,80 @@ namespace HoverExplorer
             _altSuppressToggle = new ToggleSwitch { On = Config.AltSuppressHover };
             _altSuppressToggle.Toggled += (s, e) => _fnApplySettings(false, false);
             y = _hoverGroup.AddRow(y, I18n.T("alt_suppress"), I18n.T("alt_suppress_desc"), _altSuppressToggle);
+
+            // 窗口边角：直角（卡片风默认）/ 圆角·粗描边（Win11）；切换即时重刷存活窗口
+            _cornerCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font(Config.FontName, 8.5f),
+                Width = 150,
+                Height = 24
+            };
+            _cornerCombo.Items.AddRange(new object[] { I18n.T("corner_square"), I18n.T("corner_round") });
+            _cornerCombo.SelectedIndex = Config.WindowCorners == 1 ? 1 : 0;
+            _cornerCombo.SelectedIndexChanged += (s, e) =>
+            {
+                Config.WindowCorners = _cornerCombo.SelectedIndex;
+                _fnApplySettings(false, false);
+                Program.RefreshWindowCorners();
+                Win11.RefreshNc(Handle);   // 设置窗口自己也跟着切换描边风格
+            };
+            y = _hoverGroup.AddRow(y, I18n.T("corner_row"), I18n.T("corner_desc"), _cornerCombo);
+
+            // 暂停触控区：独立框选矩形（设置方式复制触发区域那套：框选按钮+清除+矩形标签+桌面标识块）。
+            // 鼠标驻留该区域 0.3s 切换悬停启用/暂停；未框选时仅剩快捷键 Ctrl+Alt+Q
+            int pauseRowY = y;
+            y = _hoverGroup.AddRow(y, I18n.T("pause_zone_row"), null, null);
+            _pauseRectLbl = new Label
+            {
+                Text = I18n.T("area_none"),
+                Location = new Point(AccGroup.InL, AccGroup.HeadH + pauseRowY + 19),
+                AutoSize = true,
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub"
+            };
+            _hoverGroup.Controls.Add(_pauseRectLbl);
+            _pausePickBtn = new Button
+            {
+                Text = I18n.T("area_pick"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, 8.5f),
+                Size = new Size(64, 24),
+                Cursor = Cursors.Hand
+            };
+            _pausePickBtn.FlatAppearance.BorderColor = Config.Border;
+            _pausePickBtn.FlatAppearance.MouseOverBackColor = Config.BgHover;
+            _pausePickBtn.Click += (s, e) => _fnPickPauseZone();
+            _pauseClearBtn = new Button
+            {
+                Text = I18n.T("area_clear"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, 8.5f),
+                Size = new Size(60, 24),
+                Cursor = Cursors.Hand
+            };
+            _pauseClearBtn.FlatAppearance.BorderColor = Config.Border;
+            _pauseClearBtn.FlatAppearance.MouseOverBackColor = Config.BgHover;
+            _pauseClearBtn.Click += (s, e) =>
+            {
+                Config.PauseRectW = 0; Config.PauseRectH = 0;
+                _fnUpdatePauseLbl();
+                Program.UpdatePauseIndicator();
+                _fnApplySettings(false, false);
+            };
+            int pauseBtnY = AccGroup.HeadH + pauseRowY;
+            _pausePickBtn.Location = new Point(_hoverGroup.Width - AccGroup.InR - _pausePickBtn.Width, pauseBtnY);
+            _pauseClearBtn.Location = new Point(_pausePickBtn.Left - _pauseClearBtn.Width - 8, pauseBtnY);
+            _hoverGroup.Controls.Add(_pausePickBtn);
+            _hoverGroup.Controls.Add(_pauseClearBtn);
+            _hoverGroup.ExpandRow(pauseRowY, Math.Max(RowH, 19 + _pauseRectLbl.PreferredHeight + 8));
+            _fnUpdatePauseLbl();
+
             _hoverGroup.FinishRows();
 
 
@@ -584,7 +669,40 @@ namespace HoverExplorer
             _verLbl = new Label { Text = "v" + Program.Version, AutoSize = true, ForeColor = Config.PlaceholderFg, Font = new Font(Config.FontName, 8f), Tag = "sub", Visible = false };
             _verLbl.Location = new Point(aboutGroup.Width - PadX - 18 - _verLbl.PreferredWidth, aboutBase + qrSize - _verLbl.PreferredHeight);
             aboutGroup.Controls.Add(_verLbl);
-            aboutGroup.ExpandRow(aboutY + qrSize + 8, 0);
+
+            // MP3 预览慢的科普说明 + 修复工具入口（拖拽转换容器型假 MP3）
+            int mp3Y = aboutBase + qrSize + 10;
+            var mp3Title = new Label { Text = I18n.T("mp3_slow_title"), Location = new Point(PadX, mp3Y), AutoSize = true, Font = new Font(Config.FontName, 8.5f, FontStyle.Bold), Tag = "sub", Visible = false };
+            aboutGroup.Controls.Add(mp3Title);
+            var mp3Body = new Label
+            {
+                Text = I18n.T("mp3_slow_body"),
+                Location = new Point(PadX, mp3Y + 20),
+                AutoSize = false,
+                Size = new Size(aboutGroup.Width - PadX * 2, 60),
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub",
+                Visible = false
+            };
+            mp3Body.Height = Math.Max(48, (int)Math.Ceiling((double)TextRenderer.MeasureText(mp3Body.Text, mp3Body.Font, mp3Body.Size, TextFormatFlags.WordBreak).Height / 12.0) * 12 + 4);
+            aboutGroup.Controls.Add(mp3Body);
+            var fixerLink = MakeLink(I18n.T("mp3_fixer_open"), PadX, mp3Body.Bottom + 6, null);
+            fixerLink.Click += (s, e) =>
+            {
+                var exe = System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory, "Mp3Fixer.exe");
+                if (System.IO.File.Exists(exe)) { try { System.Diagnostics.Process.Start(exe); return; } catch { } }
+                // 程序目录里没有 Mp3Fixer.exe：引导到 GitHub Releases / 百度网盘（关于区下方即链接）
+                var r = System.Windows.Forms.MessageBox.Show(this,
+                    "未找到 Mp3Fixer.exe。\n\n可到 GitHub Releases 页面或百度网盘（链接见下方）下载后，放到本程序同目录。\n\n现在打开 GitHub Releases 页面？",
+                    I18n.T("mp3_fixer_open"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (r == DialogResult.Yes)
+                {
+                    try { System.Diagnostics.Process.Start("https://github.com/dlsdgj/HoverExplorer/releases"); } catch { }
+                }
+            };
+            aboutGroup.Controls.Add(fixerLink);
+            aboutGroup.ExpandRow(mp3Body.Bottom + 40 - AccGroup.HeadH, 0);
             aboutGroup.FinishRows();
 
             _fnUpdateAreaLbl();
@@ -608,7 +726,14 @@ namespace HoverExplorer
             using (var b = new SolidBrush(Config.BgHover))
                 e.Graphics.FillRectangle(b, 0, 0, Width, HeadAreaH);
             using (var p = new Pen(Config.Border, 1))
-                e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+                if (Config.WindowCorners != 1) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+            // 圆角模式的粗描边由非客户区绘制（见 WndNcBorder），客户区不画
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (Win11.WndNcBorder(Handle, ref m)) return;
+            base.WndProc(ref m);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -783,6 +908,32 @@ namespace HoverExplorer
             pill.Location = new Point(g.Width - AccGroup.InR - pill.Width, pill.Location.Y);
         }
 
+        private void _fnUpdatePauseLbl()
+        {
+            if (_pauseRectLbl == null) return;
+            _pauseRectLbl.Text = Config.PauseRectW >= 20
+                ? string.Format(I18n.T("area_fmt"), Config.PauseRectW, Config.PauseRectH, Config.PauseRectX, Config.PauseRectY)
+                : I18n.T("area_none");
+        }
+
+        private void _fnPickPauseZone()
+        {
+            // 暂停触控区框选（复制触发区域的框选流程）：确定后写入矩形并刷新标识块
+            using (var pick = new AreaPickForm(delegate(Rectangle r)
+            {
+                // 最小 5×5：选定后桌面红框+坐标即时可见可校验
+                if (r.Width < 5 || r.Height < 5) return;
+                Config.PauseRectX = r.X; Config.PauseRectY = r.Y;
+                Config.PauseRectW = r.Width; Config.PauseRectH = r.Height;
+                _fnUpdatePauseLbl();
+                Program.UpdatePauseIndicator();
+                _fnApplySettings(false, false);
+            }))
+            {
+                pick.ShowDialog(this);
+            }
+        }
+
         private void _fnPickArea()
         {
             // 全屏遮罩框选（Esc 取消）；确定后写 _entryRect 并即时预览显示
@@ -813,6 +964,7 @@ namespace HoverExplorer
             Config.HotkeyKey = _hoverKey;
             Config.HoverDelay = _delayStepper.Value;
             Config.CloseDelay = _closeDelayStepper.Value / 1000.0;
+            Config.EntryRectDelayMs = _entryDelayStepper.Value;
             Config.CardHotkeyEnabled = _cardToggle.On;
             Config.CardHotkeyModifiers = _cardMods;
             Config.CardHotkeyKey = _cardKey;

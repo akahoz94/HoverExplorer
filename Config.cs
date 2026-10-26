@@ -41,10 +41,13 @@ namespace HoverExplorer
         public static double CloseDelay = 0.35;
         // 鼠标离开后关闭列表/预览窗的统一延迟（毫秒）：面板、预览窗、历史·收藏列表共用
         public static int CloseDelayMs { get { return Math.Max(50, (int)Math.Round(CloseDelay * 1000)); } }
+        // 触发区域（收藏·历史入口）悬停延时（毫秒），独立于文件夹悬停延时
+        public static int EntryRectDelayMs = 300;
+        // 暂停触控区：鼠标驻留屏幕角落切换悬停启用/暂停（0=关 1=左上 2=右上 3=左下 4=右下）
         public static int CheckInterval = 80;
         public static int PopupOffset = 16;
         public static int SubGap = 4;
-        public static int MaxItems = 200;
+        public static int MaxItems = 400;   // 200 会在几百条的目录（如 D:\下载）截掉中文名条目
         public static int PreviewMinWidth = 240;
         public static bool PreviewOriginalSize = false;
         // 记住的图片预览窗口尺寸（右下角手柄拖拽 / Ctrl+滚轮 调整后写入）；0 = 未设置，走自动尺寸
@@ -62,12 +65,16 @@ namespace HoverExplorer
         public static bool PreviewAudioCollapsed = true;
         // 收藏·历史列表宽度：0=按内容自适应；>0=用户拖宽后记忆
         public static int EntryListW = 0;
+        // 窗口边角风格：0=直角（默认，锐利卡片风）1=圆角·粗描边（DWM 圆角 + 3px 自绘描边）
+        public static int WindowCorners = 0;
         // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
         public static double PreviewMaxRatio = 0.8;
         // 固定为"仅图标/名称触发"（已移除该开关）
         public static readonly bool NameOnlyTrigger = true;
         public static int PanelWidth = 0;
         public static int PanelHeight = 0;
+        // 面板高度自动适配内容（条目多时面板长高）；用户手动拖过尺寸后转纯记忆模式
+        public static bool PanelSizeAuto = true;
         public static bool ExplorerEnabled = false;
         // Total Commander 悬停检测（TC 11.x LCL 界面，文件列表类名 "L"）。
         // 2026-10-22 暂停：排序对齐不可靠（ini 是退出快照、临时排序错位）、HintWindow 阴影残留
@@ -96,6 +103,8 @@ namespace HoverExplorer
         public static int EntryRectX = 0, EntryRectY = 0, EntryRectW = 0, EntryRectH = 0;
         // 触发区域的 RGBA 标识色（ARGB）：桌面穿透色块 + 设置面板色块预览
         public static int EntryRectColor = 0x283B8EEA;   // 蓝 ≈16% 透明度
+        // 暂停触控区：独立框选矩形（设置方式复制触发区域那套），屏幕绝对坐标；W/H<20=未启用
+        public static int PauseRectX = 0, PauseRectY = 0, PauseRectW = 0, PauseRectH = 0;
         // 收藏文件夹（用户手动）与最近打开（自动 MRU，上限 EntryRecentMax）
         public static List<string> FavoriteFolders = new List<string>();
         public static List<string> RecentFolders = new List<string>();
@@ -213,6 +222,7 @@ namespace HoverExplorer
             ListBtnHv = ColorTranslator.FromHtml("#e0d0b8");
             ListCanvas = ListBg;   // 列表画布底色默认=行背景；用户可单独设以分离行底与画布底
             if (string.IsNullOrEmpty(ListPalette)) return;
+            bool sawCanvas = false, sawHdbg = false;
             foreach (var line in ListPalette.Split('\n'))
             {
                 var t = line.Trim().TrimEnd('\\');   // 容错：AI 输出可能每行尾带反斜线/代码块标记
@@ -242,11 +252,15 @@ namespace HoverExplorer
                     case "acfg": ListAcFg = c; break;
                     case "bd": ListBd = c; break;
                     case "sb": ListSb = c; break;
-                    case "hdbg": ListHdbg = c; break;
+                    case "hdbg": ListHdbg = c; sawHdbg = true; break;
                     case "btnhv": ListBtnHv = c; break;
-                    case "canvas": ListCanvas = c; break;
+                    case "canvas": ListCanvas = c; sawCanvas = true; break;
                 }
             }
+            // 方案未单独定义画布/表头底时跟随方案背景：否则深色方案下这两处仍是
+            // 浅色默认值（滚动条让位区/行区露底、顶栏标题与搜索框残留浅色）
+            if (!sawCanvas) ListCanvas = ListBg;
+            if (!sawHdbg) ListHdbg = ListBg;
         }
 
         // 解析配色文本为 15 色字典A字典（基于当前 ListXxx + text 覆盖，不写全局；色块预览用）
@@ -328,9 +342,12 @@ namespace HoverExplorer
                         case "PreviewAudioH": PreviewAudioH = Convert.ToInt32(v); break;
                         case "PreviewAudioCollapsed": PreviewAudioCollapsed = Convert.ToBoolean(v); break;
                         case "EntryListW": EntryListW = Convert.ToInt32(v); break;
+                        case "WindowCorners": WindowCorners = Convert.ToInt32(v); break;
+                        case "EntryRectDelayMs": EntryRectDelayMs = Convert.ToInt32(v); break;
                         case "PreviewMaxRatio": PreviewMaxRatio = Convert.ToDouble(v); break;
                         case "PanelWidth": PanelWidth = Convert.ToInt32(v); break;
                         case "PanelHeight": PanelHeight = Convert.ToInt32(v); break;
+                        case "PanelSizeAuto": PanelSizeAuto = Convert.ToBoolean(v); break;
                         case "TextPreviewLines": TextPreviewLines = Convert.ToInt32(v); break;
                         case "ExplorerEnabled": ExplorerEnabled = Convert.ToBoolean(v); break;
                         case "TcEnabled": TcEnabled = Convert.ToBoolean(v); break;
@@ -369,6 +386,10 @@ namespace HoverExplorer
                         case "EntryRectY": EntryRectY = Convert.ToInt32(v); break;
                         case "EntryRectW": EntryRectW = Convert.ToInt32(v); break;
                         case "EntryRectH": EntryRectH = Convert.ToInt32(v); break;
+                        case "PauseRectX": PauseRectX = Convert.ToInt32(v); break;
+                        case "PauseRectY": PauseRectY = Convert.ToInt32(v); break;
+                        case "PauseRectW": PauseRectW = Convert.ToInt32(v); break;
+                        case "PauseRectH": PauseRectH = Convert.ToInt32(v); break;
                         case "EntryRectColor": EntryRectColor = Convert.ToInt32(v); break;
                         case "FavoriteFolders":
                             FavoriteFolders = new List<string>();
@@ -430,6 +451,10 @@ namespace HoverExplorer
                 data["EntryRectY"] = EntryRectY;
                 data["EntryRectW"] = EntryRectW;
                 data["EntryRectH"] = EntryRectH;
+                data["PauseRectX"] = PauseRectX;
+                data["PauseRectY"] = PauseRectY;
+                data["PauseRectW"] = PauseRectW;
+                data["PauseRectH"] = PauseRectH;
                 data["EntryRectColor"] = EntryRectColor;
                 data["FavoriteFolders"] = FavoriteFolders;
                 data["RecentFolders"] = RecentFolders;
@@ -458,9 +483,12 @@ namespace HoverExplorer
                 data["PreviewAudioH"] = PreviewAudioH;
                 data["PreviewAudioCollapsed"] = PreviewAudioCollapsed;
                 data["EntryListW"] = EntryListW;
+                data["WindowCorners"] = WindowCorners;
+                data["EntryRectDelayMs"] = EntryRectDelayMs;
                 data["PreviewMaxRatio"] = PreviewMaxRatio;
                 data["PanelWidth"] = PanelWidth;
                 data["PanelHeight"] = PanelHeight;
+                data["PanelSizeAuto"] = PanelSizeAuto;
                 data["PinnedItems"] = PinnedItems;
                 var jss2 = new JavaScriptSerializer();
                 File.WriteAllText(p, jss2.Serialize(data));

@@ -17,8 +17,33 @@ using ElementHost = System.Windows.Forms.Integration.ElementHost;
 
 namespace HoverExplorer
 {
-    internal static class MediaPreview
+internal static class MediaPreview
+{
+    internal static string TruncPath(string p)
     {
+        if (string.IsNullOrEmpty(p)) return "";
+        return p.Length > 48 ? "..." + p.Substring(p.Length - 48) : p;
+    }
+
+    // 真实 MP3 检测（魔数）：ID3 头或 MPEG 帧同步。大量“假 MP3”实际是油管 DASH 流
+    // （ftyp 容器）改了扩展名——MCI 解不了它们，Media Foundation 打开也极慢。
+    // 只有真 MP3 才走 MCI 毫秒级路径
+    internal static bool IsRealMp3(string path)
+    {
+        try
+        {
+            using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+            {
+                var b = new byte[3];
+                if (fs.Read(b, 0, 3) < 3) return false;
+                if (b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33) return true;          // "ID3"
+                if (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0) return true;                  // MPEG 帧同步
+                return false;
+            }
+        }
+        catch { return false; }
+    }
+
         // ===== Shell 缩略图（SVG 渲染图，零依赖）=====
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
         private static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
@@ -82,6 +107,26 @@ namespace HoverExplorer
         // 操作栏（播放键/进度覆盖层/频谱）由 PreviewForm 自绘，播放状态通过 MediaSession 读写
         internal static WinControl MediaPlayer(string path, bool isVideo, int w, int h)
         {
+            // 真 MP3 走 MCI：无索引 MP3 的 Media Foundation 打开要全文件扫描求时长（大文件数秒），
+            // MCI 只读头部毫秒级打开。魔数检测过滤“假 MP3”（油管 DASH 流改扩展名，MCI 必败）；
+            // MCI 打开失败时仍回退 MediaElement
+            if (!isVideo && string.Equals(System.IO.Path.GetExtension(path), ".mp3", StringComparison.OrdinalIgnoreCase)
+                && IsRealMp3(path))
+            {
+                try
+                {
+                    var mci = new MciAudioSession(path);
+                    if (!mci.HasFailed)
+                    {
+                        var mp = new WinControl { Size = new Size(w, h) };
+                        mp.Tag = mci;
+                        mp.Disposed += delegate { mci.Close(); };
+                        return mp;
+                    }
+                    mci.Close();
+                }
+                catch { }
+            }
             var panel = new WinPanel { Size = new DrawingSize(w, h), BackColor = Config.BG };
             var session = new MediaSession(path, isVideo);
             panel.Tag = session;
@@ -240,7 +285,7 @@ namespace HoverExplorer
         // 播放中的 MediaElement 占着文件句柄，改名/移动前必须 Close，否则 File.Move 失败
         internal static void StopMedia(WinControl root)
         {
-            var session = root.Tag as MediaSession;
+            var session = root.Tag as IMediaSession;
             if (session != null) { session.Close(); return; }
             var me = root.Tag as MediaElement;
             if (me != null) { try { me.Close(); } catch { } }
@@ -249,7 +294,7 @@ namespace HoverExplorer
         // 改名后按新路径重新播放；标题栏的文件名/格式/图标由 PreviewForm.RestoreContentTo 刷新
         internal static void PlayMedia(WinControl root, string path)
         {
-            var session = root.Tag as MediaSession;
+            var session = root.Tag as IMediaSession;
             if (session != null) session.Reload(path);
         }
 
@@ -355,7 +400,7 @@ namespace HoverExplorer
 
     // 播放会话：把 WPF MediaElement 的加载/播放/进度抽出来，视频控制条与音频操作栏共用。
     // 音频窗口不显示画面，但 ElementHost 仍需挂在可见控件树里（取 1×1），否则 WPF 可能停掉播放。
-    internal sealed class MediaSession
+    internal sealed class MediaSession : IMediaSession
     {
         private readonly ElementHost _host;
         private readonly MediaElement _me;
@@ -363,18 +408,20 @@ namespace HoverExplorer
         private bool _loaded;
         private bool _playing;
         private bool _failed;
+        private bool _closed;
+        private System.Windows.Forms.Timer _loadTimer;
         private TimeSpan _total;
         private double? _estimateMs;
 
-        internal string Path { get; private set; }
-        internal bool IsVideo { get; private set; }
+        public string Path { get; private set; }
+        public bool IsVideo { get; private set; }
 
-        internal event Action Opened;
-        internal event Action Failed;
-        internal event Action Ended;
-        internal event Action<double?> EstimateReady;
+        public event Action Opened;
+        public event Action Failed;
+        public event Action Ended;
+        public event Action<double?> EstimateReady;
 
-        internal MediaSession(string path, bool isVideo)
+        public MediaSession(string path, bool isVideo, bool autoPlay = true)
         {
             Path = path;
             IsVideo = isVideo;
@@ -392,8 +439,19 @@ namespace HoverExplorer
             _host.Child = _me;
             _me.MediaOpened += delegate
             {
+                // 幽灵播放防护：DASH 容器等慢打开文件，用户可能已移开（Close 已调）——
+                // MF 完成异步打开后会兑现构造时排队的 Play()，旧歌在离开数秒后突然响起。
+                // 打开完成时若已关闭：立即停播并掐灭，不再通知任何事件
+                if (_closed)
+                {
+                    Program.DebugLog("[audio] media-opened after close (ghost killed) " + MediaPreview.TruncPath(Path));
+                    try { _me.Stop(); } catch { }
+                    try { _me.Close(); } catch { }
+                    return;
+                }
                 _loaded = true;
                 if (_me.NaturalDuration.HasTimeSpan) _total = _me.NaturalDuration.TimeSpan;
+                Program.DebugLog("[audio] media-opened (sound starts) " + MediaPreview.TruncPath(Path));
                 var a = Opened; if (a != null) { try { a(); } catch { } }
             };
             _me.MediaFailed += delegate(object s, ExceptionRoutedEventArgs e)
@@ -408,9 +466,28 @@ namespace HoverExplorer
                 try { _me.Position = TimeSpan.Zero; } catch { }
                 var a = Ended; if (a != null) { try { a(); } catch { } }
             };
+            // 打开超时：DASH 容器等“假 MP3”会让 Media Foundation 长时间打不开（甚至不回调），
+            // 6 秒无 Opened/Failed 判定失败，UI 显示失败而不是永远“加载中”
+            _loadTimer = new System.Windows.Forms.Timer { Interval = 6000 };
+            _loadTimer.Tick += delegate
+            {
+                _loadTimer.Stop(); _loadTimer.Dispose(); _loadTimer = null;
+                if (_loaded || _failed || _closed) return;
+                _failed = true;
+                _playing = false;
+                Program.DebugLog("[audio] open-timeout " + MediaPreview.TruncPath(path));
+                var fa = Failed; if (fa != null) { try { fa(); } catch { } }
+            };
+            _loadTimer.Start();
             _me.Source = new Uri(path, UriKind.Absolute);
-            _me.Play();            // 预览弹出即播放（音频同样自动播）
-            _playing = true;
+            // autoPlay=false = 预取模式：仅让 Media Foundation 提前打开文件（无索引 MP3 的
+            // 全文件扫描在悬停到达前完成），不起播；悬停到该文件时 Play() 立即出声
+            if (autoPlay)
+            {
+                _me.Play();
+                _playing = true;
+                Program.DebugLog("[audio] play " + MediaPreview.TruncPath(path));
+            }
             // 后台快速估算时长：大 MP3 无索引时 MF 求时长较慢，先给个可读的近似值
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -423,38 +500,38 @@ namespace HoverExplorer
             });
         }
 
-        internal WinControl HostView { get { return _host; } }
-        internal bool IsLoaded { get { return _loaded; } }
-        internal bool IsPlaying { get { return _playing && !_failed; } }
-        internal bool HasFailed { get { return _failed; } }
-        internal TimeSpan Duration { get { return _total; } }
-        internal double? EstimatedMs { get { return _estimateMs; } }
-        internal int NaturalWidth { get { try { return _me.NaturalVideoWidth; } catch { return 0; } } }
-        internal int NaturalHeight { get { try { return _me.NaturalVideoHeight; } catch { return 0; } } }
+        public WinControl HostView { get { return _host; } }
+        public bool IsLoaded { get { return _loaded; } }
+        public bool IsPlaying { get { return _playing && !_failed; } }
+        public bool HasFailed { get { return _failed; } }
+        public TimeSpan Duration { get { return _total; } }
+        public double? EstimatedMs { get { return _estimateMs; } }
+        public int NaturalWidth { get { try { return _me.NaturalVideoWidth; } catch { return 0; } } }
+        public int NaturalHeight { get { try { return _me.NaturalVideoHeight; } catch { return 0; } } }
 
-        internal TimeSpan Position
+        public TimeSpan Position
         {
             get { try { return _me.Position; } catch { return TimeSpan.Zero; } }
         }
 
-        internal void Play()
+        public void Play()
         {
             if (_failed) return;
             try { _me.Play(); _playing = true; } catch { }
         }
 
-        internal void Pause()
+        public void Pause()
         {
             try { _me.Pause(); } catch { }
             _playing = false;
         }
 
-        internal void Toggle()
+        public void Toggle()
         {
             if (_playing) Pause(); else Play();
         }
 
-        internal void SeekRatio(double ratio)
+        public void SeekRatio(double ratio)
         {
             if (_total <= TimeSpan.Zero) return;
             if (ratio < 0) ratio = 0;
@@ -462,7 +539,7 @@ namespace HoverExplorer
             try { _me.Position = TimeSpan.FromTicks((long)(_total.Ticks * ratio)); } catch { }
         }
 
-        internal void Reload(string path)
+        public void Reload(string path)
         {
             Path = path;
             _loaded = false;
@@ -477,9 +554,17 @@ namespace HoverExplorer
             catch { _playing = false; }
         }
 
-        internal void Close()
+        public void Close()
         {
+            Program.DebugLog("[audio] stop+close " + MediaPreview.TruncPath(Path));
             _playing = false;
+            _closed = true;
+            if (_loadTimer != null) { try { _loadTimer.Stop(); _loadTimer.Dispose(); } catch { } _loadTimer = null; }
+            // 三连停：Volume=0 是即时属性（不走 MF 命令队列，绝对瞬间静音）→ Stop 即时停止
+            // 播放 → Close 异步拆除会话。只调 Close 时 Media Foundation 的会话关闭是异步的，
+            // 音频会继续渲染数秒才真正停止（切换/关闭拖好几秒的根因）
+            try { _me.Volume = 0; } catch { }
+            try { _me.Stop(); } catch { }
             try { _me.Close(); } catch { }
         }
     }

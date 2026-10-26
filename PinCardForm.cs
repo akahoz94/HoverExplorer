@@ -659,8 +659,10 @@ namespace HoverExplorer
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // 卡片配色独立于面板主题：DWM 暗色模式按卡片底色明暗决定
+            // 卡片配色独立于面板主题：DWM 暗色模式按卡片底色明暗决定。
+            // 圆角模式也强制卡片直角：DWM 裁角与卡片自有硬描边/全高色条冲突（残角/碎边）
             Win11.Apply(Handle, CardPalette.Lum(_bg) < 128, Config.Border);
+            Win11.ForceSquareCorners(Handle);
         }
 
         protected override void OnPaint(PaintEventArgs e)

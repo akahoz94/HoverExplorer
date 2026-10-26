@@ -82,6 +82,8 @@ namespace HoverExplorer
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            // 提示文字一律 1px 细边：圆角模式的非客户区粗描边（FramePad 还会内缩裁掉文字）
+            // 对小尺寸提示窗太重，不需要跟随 WindowCorners
             using (var pen = new Pen(Config.Border)) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
         }
     }
@@ -204,7 +206,10 @@ namespace HoverExplorer
         {
             DoubleBuffered = true;
             AutoScroll = false;
-            _content = new ContentPanel { BackColor = Config.BG, Location = new Point(0, 0) };
+            // 行区真实可见背景：所有行都加在 _content 上、它盖满整个行区，
+            // 故必须用配色方案背景色（ListCanvas，跟随方案）而非主题色 Config.BG，
+            // 否则 tint 会把 Config.BG 换成浅色 lbg，行区四周/滚动条让位列露出浅色
+            _content = new ContentPanel { BackColor = Config.ListCanvas, Tag = "noTint", Location = new Point(0, 0) };
             Controls.Add(_content);
         }
 
@@ -289,15 +294,16 @@ namespace HoverExplorer
         public bool OriginalTopSet;   // false=未在过滤态（int 默认 0 无法区分原位 0）
         // 互换布局：分栏分隔线在行内的 X 坐标（左侧安全区右界），拖线时由面板实时更新
         public int SplitX;
-        // 行外缘内缩：大小背景条/大小文字都留出这段，避免贴死面板边缘（与名称条 6px 内缩一致）
-        private const int PadEdge = 6;
+        // 行外缘内缩：行区已整体内缩 ListPadLr，行内不再重复留出这段（大小条/大小文字贴行缘，
+        // 与顶部内容右缘对齐）；保留常量便于将来微调
+        private const int PadEdge = 0;
         // 斑马纹行号（构建时赋值，偶数行用 ListZb）+ 大小背景条比例(log10 比，文件夹=0)+大小列宽
         public int RowIndex;
         public float SizeRatio;
         public float SizeColW;
 
         // 名称单行中间省略："前半…后半"（Finder 风格，左 60% 右 40%），二分找最大保留字符数
-        private static string MidEllipsis(Graphics g, string s, Font f, float maxW)
+        internal static string MidEllipsis(Graphics g, string s, Font f, float maxW)
         {
             if (string.IsNullOrEmpty(s)) return s;
             var sf = StringFormat.GenericTypographic;
@@ -391,6 +397,19 @@ namespace HoverExplorer
                 using (var b = new SolidBrush(Config.ListMu))
                     e.Graphics.DrawString(SizeText, Font, b, x, y);
             }
+            // 名称单行显示、过长时中间省略（Label 文本会换行，故走自绘）
+            if (!string.IsNullOrEmpty(Name))
+            {
+                float textX = Padding.Left;                       // 图标位之后
+                float maxW = Width - Padding.Left - Padding.Right; // 右侧留大小文本列
+                if (maxW > 8)
+                {
+                    float lh = Font.GetHeight(e.Graphics);
+                    using (var b = new SolidBrush(ForeColor))
+                        e.Graphics.DrawString(MidEllipsis(e.Graphics, Name, Font, maxW), Font, b,
+                            textX, (Height - lh) / 2, StringFormat.GenericTypographic);
+                }
+            }
         }
     }
 
@@ -419,6 +438,9 @@ namespace HoverExplorer
     internal class SizeGripCtl : Control
     {
         private bool _hover;
+        // 列表窗=true：背景填状态栏同色。手柄叠在状态栏右端上，默认的“父级背景模拟”
+        // 会把窗体底色涂到状态栏右端上，形成一块突兀的白色控件
+        public bool MatchStatusbar;
 
         public SizeGripCtl()
         {
@@ -432,22 +454,26 @@ namespace HoverExplorer
         protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
 
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            // 列表窗：像素级还原“没有手柄时”的样子——手柄(16×16)贴角，与状态栏重叠的内侧
+            // 10×10 填状态栏同色；压在右缘/底缘 6px padding 上的部分填窗体底色。
+            // 此前整块填状态栏色会在 padding 区多出一圈台阶色差
+            if (MatchStatusbar && Parent != null)
+            {
+                using (var b = new SolidBrush(Parent.BackColor))
+                    e.Graphics.FillRectangle(b, e.ClipRectangle);
+                using (var b = new SolidBrush(Config.ListHdbg))
+                    e.Graphics.FillRectangle(b, 0, 0, Math.Min(Width, 10), Math.Min(Height, 10));
+                return;
+            }
+            base.OnPaintBackground(e);
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            // 空闲时很淡，鼠标移到角上才加亮：避免常显手柄遮挡右下角信息
-            int a = _hover ? 220 : 80;
-            int len = Math.Min(Width, Height) - 8;
-            if (len < 4) len = 4;
-            int m = 3;
-            int x = Width - 1 - m, y = Height - 1 - m;   // 角的顶点（右下）
-            using (var pen = new Pen(Color.FromArgb(a, Config.PlaceholderFg), _hover ? 1.6f : 1.2f))
-            {
-                // 反向 "L"：沿右边缘的短线 + 沿下边缘的短线，构成右下角标
-                g.DrawLine(pen, x, y, x, y - len);
-                g.DrawLine(pen, x, y, x - len, y);
-            }
+            // 不绘制任何提示线：缩放热区靠光标(SizeNWSE)+悬停提示表达，
+            // 浅色 L 线在深色背景、白色底块在浅色状态栏上都显得突兀
         }
     }
 
@@ -517,7 +543,7 @@ namespace HoverExplorer
         private WheelFilter _wheelFilter;
 
         // ===== 音频预览专用（操作栏：播放键+全量波形；悬停展开信息区：标题/时间/meta）=====
-        private MediaSession _audio;
+        internal IMediaSession _audio;
         private Label _audioPlayBtn;
         private Label _audioTimeLbl;
         private Label _audioMetaLbl;
@@ -661,7 +687,7 @@ namespace HoverExplorer
         // 操作栏接管播放键、进度覆盖层、时间与频谱，复制/固定为卡片按钮不显示
         private void SetupAudio(Control hostPanel, int contentW)
         {
-            _audio = hostPanel.Tag as MediaSession;
+            _audio = hostPanel.Tag as IMediaSession;
             // WPF 宿主必须留在可见控件树里才会持续播放：塞进操作栏左上角 1×1 区域，
             // 被操作栏盖住不可见，但折叠/展开都不影响音频输出
             hostPanel.Dock = DockStyle.None;
@@ -870,7 +896,9 @@ namespace HoverExplorer
                 _wavePath = null;
                 Array.Clear(_waveData, 0, _waveData.Length);
             }
-            if (_waveDec == null && total > 0 && !_audio.HasFailed)
+            // 仅当用户已展开信息区/固定预览时才解码全量波形：纯 hover 预览（鼠标还停在文件名上）
+            // 不抢同一文件的磁盘 IO，避免与 WPF 播放器争读取导致音频启动慢；波形用回退包络动画顶替
+            if (_waveDec == null && total > 0 && !_audio.HasFailed && (_audioExpanded || _pinned))
                 _waveDec = WaveDecoder.Begin(_audio.Path, total / 1000.0);
 
             if (_audio.HasFailed)
@@ -1263,6 +1291,9 @@ namespace HoverExplorer
 
         protected override void WndProc(ref Message m)
         {
+            // 圆角模式描边与自身背景同色：亮色描边压在深色配色上很突兀，
+            // 同色后只剩 DWM 圆角外形（回调动态取 BackColor，主题/层级着色跟随）
+            if (Win11.WndNcBorder(Handle, ref m, () => BackColor)) return;
             // WM_EXITSIZEMOVE：右下角手柄/边缘拖拽结束后记住尺寸（图片与媒体面板都记）。
             // 拖动窗口位置也走这个消息，所以只有尺寸真的变了才记，否则挪一下窗口就把尺寸写死。
             if (m.Msg == 0x231) _pvSizeMoveStart = ClientSize;
@@ -1459,8 +1490,37 @@ namespace HoverExplorer
                 if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext))
                     result.Add(f);
             }
-            result.Sort(StringComparer.OrdinalIgnoreCase);
-            return result;
+            // 滚轮切换顺序与文件列表一致（名称/大小/日期 + 升降序），而不是固定按名称
+            string mode = PopupForm.SortMode;
+            bool desc = PopupForm.SortDesc;
+            var sizes = new long[result.Count];
+            var times = new long[result.Count];
+            if (mode == "size" || mode == "date")
+            {
+                for (int i = 0; i < result.Count; i++)
+                {
+                    try
+                    {
+                        if (mode == "size") sizes[i] = new FileInfo(result[i]).Length;
+                        else times[i] = File.GetLastWriteTimeUtc(result[i]).Ticks;
+                    }
+                    catch { }
+                }
+            }
+            var idx = new int[result.Count];
+            for (int i = 0; i < idx.Length; i++) idx[i] = i;
+            Array.Sort<int>(idx, (ia, ib) =>
+            {
+                int cmp;
+                if (mode == "size") cmp = sizes[ia].CompareTo(sizes[ib]);
+                else if (mode == "date") cmp = times[ia].CompareTo(times[ib]);
+                else cmp = string.Compare(result[ia], result[ib], StringComparison.OrdinalIgnoreCase);
+                if (cmp == 0) cmp = string.Compare(result[ia], result[ib], StringComparison.OrdinalIgnoreCase);
+                return desc ? -cmp : cmp;
+            });
+            var sorted = new List<string>(result.Count);
+            for (int i = 0; i < result.Count; i++) sorted.Add(result[idx[i]]);
+            return sorted;
         }
 
         private void SwitchFile(int dir)
@@ -1695,13 +1755,10 @@ namespace HoverExplorer
             if (_audioFoldTimer != null) { _audioFoldTimer.Stop(); _audioFoldTimer.Dispose(); _audioFoldTimer = null; }
             if (_waveDec != null) { _waveDec.Cancel(); _waveDec = null; }
             if (_audioMeter != null) { _audioMeter.Dispose(); _audioMeter = null; }
+            // 音频播放器是挂在 hostPanel.Tag 上的 COM 对象，窗体 Dispose 不会自动调其
+            // Dispose→Stop，窗口关了声音还在播；必须显式停止，否则鼠标离开后声音拖好几秒
+            if (_audio != null) { try { _audio.Close(); } catch { } _audio = null; }
             base.OnFormClosed(e);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-
-            base.OnPaint(e);
         }
 
         private void TogglePin()
@@ -2087,6 +2144,10 @@ namespace HoverExplorer
         private SlimScrollBar _listScrollBar;
         private bool _syncingScroll;   // 滑块↔内容层双向同步防回环（避免动画被 sb.Scroll 回调误杀）
         private const int SlimBarW = 10;   // 自绘细滚动条占宽（行右侧让位）
+        // 列表行区左右内缩/底部留白：与顶部名称栏、排序栏、底部状态栏的左右内缩(6)对齐，
+        // 行不再顶到面板左右边缘与底边，视觉上与顶部呼应
+        private const int ListPadLr = 6;
+        private const int ListPadBottom = 6;
         private string _path;
         private int _headH;
         private int _panelW = 260;
@@ -2096,6 +2157,8 @@ namespace HoverExplorer
         private Size _sizeMoveStart;
 
         private Timer _hoverTimer;
+        private Timer _dragSubTimer;      // 拖拽悬停文件夹的级联调度（OLE 拖拽期间 MouseEnter 不触发）
+        private RowLabel _dragSubRow;
         private string _hoverPath;
         private int _hoverRowY;
         private Timer _previewTimer;
@@ -2132,6 +2195,22 @@ namespace HoverExplorer
         private Timer _gripTimer;
 
         public bool Pinned { get { return _pinned; } }
+
+        // 圆角模式（WindowCorners=1）下 WndNcBorder 的 WM_NCCALCSIZE 把客户区四周内缩
+        // FramePad 像素，WinForms 的 ClientSize 并不知情：设 260 宽实际只剩 254，底部状态栏
+        // “6 项”被描边裁断、四边留白不对称。这里整体改写 ClientSize 语义——写入口补上描边
+        // 占位、读取口返回真实客户区，类内所有布局/尺寸读写自动与描边协调；
+        // 直角模式 FramePad=0，读写与原生行为完全一致
+        public new Size ClientSize
+        {
+            get
+            {
+                // 不直接摸 Handle：getter 访问 Handle 会强制提前创建窗口句柄，打乱免激活时序
+                var s = IsHandleCreated ? Win11.RealClient(Handle) : Size.Empty;
+                return s.IsEmpty ? base.ClientSize : s;
+            }
+            set { base.ClientSize = new Size(value.Width + Win11.FramePad * 2, value.Height + Win11.FramePad * 2); }
+        }
 
         public PopupForm(int level, Action<PopupForm, int, string, int> onOpenSub, Func<int, int, string> dropResolver, Action<int> onScheduleCloseAfter)
         {
@@ -2212,7 +2291,7 @@ namespace HoverExplorer
             base.OnResize(e);
             UpdateGripPos();
             // 拖动右下角手柄改宽度后同步顶部与行宽度（只同步宽度，不重排行高）
-            if (Width != _panelW) SyncWidth(ClientSize.Width);
+            if (ClientSize.Width != _panelW) SyncWidth(ClientSize.Width);
             if (_pinBtn != null) _pinBtn.BringToFront();
             if (_pinCardBtn != null) _pinCardBtn.BringToFront();
         }
@@ -2250,6 +2329,9 @@ namespace HoverExplorer
 
         protected override void WndProc(ref Message m)
         {
+            // 圆角模式描边与自身背景同色：亮色描边压在深色配色上很突兀，
+            // 同色后只剩 DWM 圆角外形（回调动态取 BackColor，主题/层级着色跟随）
+            if (Win11.WndNcBorder(Handle, ref m, () => BackColor)) return;
             // 拖动面板用的是 WM_NCLBUTTONDOWN+HTCAPTION，它同样会发 WM_EXITSIZEMOVE。
             // 因此必须区分“挪位置”和“改尺寸”：否则挪一下只有一个文件的小面板，
             // 它的高度就被记成全局默认的 PanelHeight，之后文件多的列表也被压成这么高。
@@ -2261,6 +2343,7 @@ namespace HoverExplorer
                 {
                     Config.PanelWidth = ClientSize.Width;
                     Config.PanelHeight = ClientSize.Height;
+                    Config.PanelSizeAuto = false;   // 手动拖过 = 转纯记忆模式
                     // 固定面板手动改过尺寸后，后续刷新沿用新尺寸
                     if (_pinned) { _pinnedW = ClientSize.Width; _pinnedH = ClientSize.Height; }
                     Config.Save();
@@ -2280,6 +2363,7 @@ namespace HoverExplorer
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
+            CancelDragSub();
             base.OnFormClosed(e);
         }
 
@@ -2343,7 +2427,7 @@ namespace HoverExplorer
                 {
                     _nameRow.Width = w - 12;
                     if (_titleLbl != null) _titleLbl.Width = Math.Max(40, w - 12 - 24);
-                    if (_editBtn != null) _editBtn.Left = w - 12 - 20;
+                    if (_editBtn != null) _editBtn.Left = w - 12 - 18;
                     if (_nameEdit != null) _nameEdit.Width = Math.Max(60, w - 12 - 24);
                 }
             }
@@ -2355,8 +2439,8 @@ namespace HoverExplorer
             {
                 var lp = (SlimScrollPanel)_listPanel;
                 int sw = lp.CanScroll ? SlimBarW : 0;
-                _listPanel.Width = w;
-                foreach (var r in _rows) r.Width = w - sw;
+                _listPanel.Width = w - ListPadLr * 2;
+                foreach (var r in _rows) r.Width = w - ListPadLr * 2 - sw;
                 _fnSyncListScroll();
             }
         }
@@ -2366,9 +2450,9 @@ namespace HoverExplorer
         {
             if (_listScrollBar == null || _listPanel == null) return;
             var lp = (SlimScrollPanel)_listPanel;
-            // 上下各留 3px：滑块顶/底不贴列表边缘，避免与排序栏和底部圆角割裂
-            const int padY = 3;
-            _listScrollBar.Location = new Point(_panelW - SlimBarW, _listPanel.Top + padY);
+            // 上下贴齐列表区：留 3px 会在滚动条两端露出一小块背景色（视觉断口）
+            const int padY = 0;
+            _listScrollBar.Location = new Point(_panelW - ListPadLr - SlimBarW, _listPanel.Top + padY);
             _listScrollBar.Size = new Size(SlimBarW, Math.Max(1, _listPanel.Height - padY * 2));
             _listScrollBar.Maximum = Math.Max(1, lp.ContentHeight);
             _listScrollBar.LargeChange = Math.Max(1, _listPanel.Height);
@@ -2386,9 +2470,11 @@ namespace HoverExplorer
             catch { return false; }
             Array.Sort(entries, StringComparer.Ordinal);
             int originalCount = entries.Length;
+            // 先按当前排序（目录优先）排好再截断：先截断会按 Ordinal 序砍掉排在后面的
+            // 中文名条目（实测 D:\下载 64 个文件夹只剩 23 个 ASCII 名的）
+            try { SortEntries(path, ref entries); } catch (Exception ex) { Program.DebugLog("[panel] SortEntries fail: " + ex.Message); }
             if (entries.Length > Config.MaxItems)
                 entries = entries.Take(Config.MaxItems).ToArray();
-            try { SortEntries(path, ref entries); } catch (Exception ex) { Program.DebugLog("[panel] SortEntries fail: " + ex.Message); }
             Program.DebugLog("[panel] ShowPanel level=" + _level + " lang=" + I18n.Lang + " path=" + path + " entries=" + entries.Length);
             _path = path;
 
@@ -2547,7 +2633,8 @@ namespace HoverExplorer
                     Size = new Size(18, 18),
                     AutoSize = false,
                     Cursor = Cursors.Hand,
-                    Location = new Point(_panelW - 12 - 20, 2),
+                    // 右缘与名称行右缘齐平（= 顶部 ⧉/📌 按钮的右缘），不留多余缩进
+                    Location = new Point(_panelW - 12 - 18, 2),
                     TextAlign = ContentAlignment.MiddleCenter,
                 };
                 // 悬停提亮一档，与列表行内按钮组保持一致的反馈
@@ -2558,8 +2645,10 @@ namespace HoverExplorer
                 _nameEdit = new TextBox
                 {
                     Font = new Font(Config.FontName, Config.FontSize),
-                    BackColor = Config.BG,
-                    ForeColor = Config.FG,
+                    // 顶栏改名框跟随列表配色（noTint 防止 tint 用主题基调改写）
+                    BackColor = Config.ListBg,
+                    ForeColor = Config.ListFg,
+                    Tag = "noTint",
                     BorderStyle = BorderStyle.FixedSingle,
                     Location = new Point(0, 1),
                     Width = Math.Max(60, _panelW - 12 - 24),
@@ -2579,18 +2668,21 @@ namespace HoverExplorer
                 curY += 22 + 2;
 
                 // 搜索框：默认隐藏，Ctrl+F 才展开（常驻输入框会带来假焦点/IME 遮挡问题）
-                _searchBorder = new Panel { BackColor = Config.Border, Location = new Point(6, curY), Size = new Size(_panelW - 12, 22), Visible = false };
+                // 搜索框跟随列表配色（ListBg/ListMu/ListFg/ListHdbg）：主题色经 tint 只换
+                // 浅色基调，深色方案下背景/边框会残留浅色；Tag=noTint 防止 tint 再改写
+                _searchBorder = new Panel { BackColor = Config.ListHdbg, Tag = "noTint", Location = new Point(6, curY), Size = new Size(_panelW - 12, 22), Visible = false };
                 _searchBox = new TextBox
                 {
                     Text = I18n.T("search"),
                     Font = new Font(Config.FontName, Config.FontSize),
-                    BackColor = Config.BG,
-                    ForeColor = Config.PlaceholderFg,
+                    BackColor = Config.ListBg,
+                    ForeColor = Config.ListMu,
                     BorderStyle = BorderStyle.None,
                     Location = new Point(1, 2),
                     Width = _searchBorder.Width - 2,
+                    Tag = "noTint",
                 };
-                _searchBox.GotFocus += (s, e) => { if (_searchBox.Text == I18n.T("search")) { _searchBox.Text = ""; _searchBox.ForeColor = Config.FG; } };
+                _searchBox.GotFocus += (s, e) => { if (_searchBox.Text == I18n.T("search")) { _searchBox.Text = ""; _searchBox.ForeColor = Config.ListFg; } };
                 _searchBox.LostFocus += (s, e) =>
                 {
                     // 诊断：搜索中失焦记录抢走前台的是谁（正常应只有 Esc/用户主动点击）
@@ -2602,7 +2694,7 @@ namespace HoverExplorer
                         Program.DebugLog("[search] lost-focus fg=0x" + fg.ToString("X") + " cls=" + sbf.ToString() + " stillOpen=" + (_searchBorder != null && _searchBorder.Visible));
                     }
                     catch { }
-                    if (string.IsNullOrEmpty(_searchBox.Text)) { _searchBox.Text = I18n.T("search"); _searchBox.ForeColor = Config.PlaceholderFg; }
+                    if (string.IsNullOrEmpty(_searchBox.Text)) { _searchBox.Text = I18n.T("search"); _searchBox.ForeColor = Config.ListMu; }
                 };
                 _searchBox.TextChanged += (s, e) => FilterRows(_searchBox.Text);
                 Tips.Set(_searchBox, I18n.T("tip_search"));
@@ -2622,7 +2714,7 @@ namespace HoverExplorer
             // 自管偏移滚动：SlimScrollBar 细滑块与内容层双向同步（滑块随滚动实时移动）
             // _syncingScroll 防回环：动画更新 sb.Value 会再触发 sb.Scroll，
             // 不加守卫会回调 SetOffset→StopAnim 把缓动动画杀在第一帧
-            _listPanel = new SlimScrollPanel { Location = new Point(0, curY), BackColor = Config.ListCanvas };
+            _listPanel = new SlimScrollPanel { Location = new Point(ListPadLr, curY), BackColor = Config.ListCanvas };
             _listPanel.MouseUp += blankMenu;
             // 内容层铺满 viewport，空白处右键同样弹菜单（否则被 content 挡住收不到）
             _listPanel.Content.MouseUp += blankMenu;
@@ -2633,6 +2725,10 @@ namespace HoverExplorer
                 // SlimScrollBar 构造里默认 Dock=Right；停靠会让滚动条铺满整个窗口高度（顶到标题栏/排序栏），
                 // 这里取消停靠，改由 _fnSyncListScroll 按列表范围定位
                 Dock = DockStyle.None,
+                // 不用 Transparent：透明模拟重画的是父窗体背景（主题混色），而滚动条实际压在
+                // _listPanel（ListCanvas）上，深色方案下两端会露出两块浅色。直接取行区同色，
+                // 轨道仍是半透明黑叠加，视觉效果不变
+                BackColor = Config.ListCanvas,
                 Style = SlimScrollBar.BarStyle.Thin,
                 ThumbColor = dark ? ColorTranslator.FromHtml("#4a5260") : ColorTranslator.FromHtml("#b8bec8"),
                 ThumbHotColor = dark ? ColorTranslator.FromHtml("#6a7484") : ColorTranslator.FromHtml("#8a919b"),
@@ -2722,7 +2818,7 @@ namespace HoverExplorer
                 Size = new Size(18, 18),
                 AutoSize = false,
                 BackColor = Config.ListHv,
-                Image = PreviewForm.EditIcon(),
+                Image = PreviewForm.EditIcon(Config.ListFg),
                 Cursor = Cursors.Hand,
                 Visible = false,
                 TextAlign = ContentAlignment.MiddleCenter,
@@ -2811,47 +2907,10 @@ namespace HoverExplorer
             SyncWidth(_panelW);
 
             int rowH = 24;
-            // 长文件名会自动换行显示：按换行后实际行数计算行高（封顶 3 行）；
-            // 名称可用宽度需扣除右侧大小文本保留区
-            var rowHeights = new List<int>();
-            using (var g = CreateGraphics())
-            {
-                float lineH = font.GetHeight(g);
-                Action<int> measureHeights = delegate(int extraCut)
-                {
-                    rowHeights.Clear();
-                    for (int i = 0; i < entries.Length; i++)
-                    {
-                        // 名称可用宽度扣除两侧保留区（互换布局：左=大小文本，右=图标位）
-                        int padSide = 4 + (sizeTexts[i] == null ? 0 : (int)sizeWs[i] + 6);
-                        int padL = Config.RowSwapSides ? padSide : 24;
-                        int padR = Config.RowSwapSides ? 28 : padSide;
-                        int availW = _panelW - padL - padR - extraCut;
-                        if (availW < 40) availW = 40;
-                        int h = rowH;
-                        var tsz = g.MeasureString(entries[i], font, availW);
-                        if (tsz.Height > lineH + 2)
-                        {
-                            int lines = (int)Math.Ceiling(tsz.Height / lineH);
-                            if (lines > 3) lines = 3;
-                            h = (int)Math.Ceiling(lines * lineH) + 7;
-                        }
-                        rowHeights.Add(h);
-                    }
-                };
-                measureHeights(0);
-                var wa0 = Screen.GetWorkingArea(Cursor.Position);
-                int totalH = curY;
-                foreach (var h in rowHeights) totalH += h;
-                if (totalH > wa0.Height - 8)
-                    measureHeights(SlimBarW);
-                // 互换布局：名称单行+中间省略（不再多行换行），行高恒定
-                if (Config.RowSwapSides)
-                {
-                    rowHeights.Clear();
-                    for (int i = 0; i < entries.Length; i++) rowHeights.Add(rowH);
-                }
-            }
+            // 名称一律单行显示、过长用中间省略号（两种布局都自绘），行高恒定，
+            // 不再按换行后的行数计算行高
+            var rowHeights = new List<int>(entries.Length);
+            for (int i = 0; i < entries.Length; i++) rowHeights.Add(rowH);
             int ry = 0;
             for (int i = 0; i < entries.Length; i++)
             {
@@ -2863,9 +2922,9 @@ namespace HoverExplorer
                     Full = full,
                     Name = name,
                     IsDir = isDir,
-                    // 互换布局：文本走 OnPaint 自绘（GDI+ 兼容模式 MiddleRight 渲染不贴缘，
-                    // 短名称停在行中部），Label.Text 置空避免 base 重复绘制
-                    Text = Config.RowSwapSides ? null : name,
+                    // 名称一律 OnPaint 自绘：Label 文本会换行，自绘才能单行+中间省略
+                    // （GDI+ 兼容模式下 MiddleRight 渲染不贴缘，短名称停在行中部）
+                    Text = null,
                     Font = font,
                     TextAlign = Config.RowSwapSides ? ContentAlignment.MiddleRight : ContentAlignment.MiddleLeft,
                     Padding = Config.RowSwapSides
@@ -2876,7 +2935,7 @@ namespace HoverExplorer
                     BackColor = Config.BG,
                     ForeColor = Config.FG,
                     Location = new Point(0, ry),
-                    Size = new Size(_panelW, rowHeights[i]),
+                    Size = new Size(_panelW - ListPadLr * 2, rowHeights[i]),
                     Icon = GetIcon(full, isDir),
                     SizeText = sizeTexts[i],
                     SplitX = _rowSideZone,
@@ -2910,9 +2969,9 @@ namespace HoverExplorer
                 {
                     row.AllowDrop = true;
                     row.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; row.BackColor = Config.ListDrop; } };
-                    row.DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
-                    row.DragLeave += (s, e) => ApplySel(row);
-                    row.DragDrop += (s, e) => { OnDrop(row, e); };
+                    row.DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; ScheduleDragSub(row); } };
+                    row.DragLeave += (s, e) => { CancelDragSub(row); ApplySel(row); };
+                    row.DragDrop += (s, e) => { CancelDragSub(); OnDrop(row, e); };
                 }
                 ((SlimScrollPanel)_listPanel).AddContent(row);
                 _rows.Add(row);
@@ -2932,25 +2991,29 @@ namespace HoverExplorer
                 ((SlimScrollPanel)_listPanel).AddContent(emptyLbl);
             }
             var workArea = Screen.GetWorkingArea(Cursor.Position);
-            int maxH = workArea.Height - 8;
-            // 记忆高度只作上限；过小的值基本是拖动小面板时误记的历史配置，当作未设置
-            if (Config.PanelHeight >= 150) maxH = Math.Min(Config.PanelHeight, maxH);
+            int maxH = workArea.Height - 40;
             int needH = curY + ry;
+            // 高度两种模式：自动适配（默认）=随内容长高，条目多时显示更多；
+            // 用户手动拖过尺寸后转纯记忆模式=严格按记忆高度（不再自动撑大）
+            if (!Config.PanelSizeAuto && Config.PanelHeight >= 150)
+                needH = Math.Min(needH, Math.Min(Config.PanelHeight, maxH));
             // 同理：固定面板沿用固定时的高度（内容变多时仍可更高，但不超过工作区）
             if (_pinned && _pinnedH > 0 && needH < _pinnedH) needH = _pinnedH;
             if (needH > maxH)
-            {
                 needH = maxH;
-                foreach (var r in _rows) r.Width = _panelW - SlimBarW;
-            }
-            _listPanel.Size = new Size(_panelW, needH - curY);
+            _listPanel.Size = new Size(_panelW - ListPadLr * 2, needH - curY);
             // 内容层高度 = 行总高（空目录给 emptyLbl 一行高），滚动范围由此确定
             int contentH = Math.Max(ry, 24);
             ((SlimScrollPanel)_listPanel).SetContentHeight(contentH);
+            // 行右侧按“实际是否出现滚动条”让位（此前只在新建超高一条路径收缩：
+            // 固定面板沿用记忆高度、内容后来变多等场景会漏——滚动条压住行尾“xx 项”的根因）
+            if (((SlimScrollPanel)_listPanel).CanScroll)
+                foreach (var r in _rows) r.Width = _panelW - ListPadLr * 2 - SlimBarW;
             _fnSyncListScroll();
             // 底部状态栏：占位防止 grip 挡住最后一行删除按钮，并显示限高/计数提示
             int statusH = 18;
-            ClientSize = new Size(_panelW, needH + statusH);
+            // 底部留白：状态栏下方再留一段，与顶部 curY=5 的上边距呼应
+            ClientSize = new Size(_panelW, needH + statusH + ListPadBottom);
             string statusText = originalCount > 0 ? I18n.T("panel_status_count", originalCount) : "";
             var statusLbl = new Label
             {
@@ -3002,7 +3065,7 @@ namespace HoverExplorer
             // 空白处右键 = 选项菜单（排序功能已由顶部排序按钮覆盖）
             MouseClick += (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
 
-            _grip = new SizeGripCtl { Size = new Size(16, 16), Cursor = Cursors.SizeNWSE, Visible = false };
+            _grip = new SizeGripCtl { Size = new Size(16, 16), MatchStatusbar = true, Cursor = Cursors.SizeNWSE, Visible = false };
             _grip.MouseDown += (s, e) =>
             {
                 if (e.Button != MouseButtons.Left) return;
@@ -3062,7 +3125,7 @@ namespace HoverExplorer
             int lx = Left, ly = Top; ClampPos(ref lx, ref ly); Location = new Point(lx, ly);
             if (on)
             {
-                _searchBox.ForeColor = Config.FG;
+                _searchBox.ForeColor = Config.ListFg;
                 _searchBox.Text = "";
                 // 面板是 ShowWithoutActivation 的后台窗体：不先 Activate，搜索框拿到的只是
                 // "假焦点"（光标闪但键盘消息仍归真正的前台），鼠标一动假象即穿帮
@@ -3072,7 +3135,7 @@ namespace HoverExplorer
             else
             {
                 _searchBox.Text = I18n.T("search");
-                _searchBox.ForeColor = Config.PlaceholderFg;
+                _searchBox.ForeColor = Config.ListMu;
                 FilterRows("");
             }
         }
@@ -3357,8 +3420,12 @@ namespace HoverExplorer
             }
             row.BackColor = Config.ListHv;
             // 按钮组紧贴排列（18px 步进无间距）：重命名·复制·钉卡片·删除；
-            // 互换布局时整组贴左缘（del·pin·copy·rename 从左往右），与大小文本同侧
-            int btnY = row.Top + (row.Height - 18) / 2;
+            // 互换布局时整组贴左缘（del·pin·copy·rename 从左往右），与大小文本同侧。
+            // 行区已整体内缩 ListPadLr，按钮贴行缘即距面板边 6px，与顶部内容对齐
+            // 按钮高度与行同高：纵向铺满整行，图标靠 ImageAlign=MiddleCenter 垂直居中
+            int btnY = row.Top;
+            foreach (var b in new[] { _rowDelBtn, _rowCopyBtn, _rowPinBtn, _rowRenameBtn })
+                if (b != null && b.Height != row.Height) b.Height = row.Height;
             bool sw = Config.RowSwapSides;
             if (_rowDelBtn != null)
             {
@@ -3398,8 +3465,20 @@ namespace HoverExplorer
             // Alt 临时禁用悬停：不调度新悬停（已调度者由计时器 tick 自查 Alt 取消）
             bool altSuppress = Config.AltSuppressHover && (Control.ModifierKeys & Keys.Alt) == Keys.Alt;
             if (enterInSide || altSuppress) return;
-            if (row.IsDir) ScheduleHover(row.Full, row.PointToScreen(Point.Empty).Y);
-            else if (canPv) SchedulePreview(row);
+            if (row.IsDir)
+            {
+                // 目录行：旧的文件预览先进入关闭调度（延迟里再判鼠标落点，鼠标移进预览则保持）。
+                // 否则从文件行滑到目录行时，若 OnRowLeave 走了早退分支，预览会一直挂着不关
+                SchedulePreviewClose();
+                ScheduleHover(row.Full, row.PointToScreen(Point.Empty).Y);
+            }
+            else if (canPv)
+            {
+                // 文件行：旧的级联子列表先进入关闭调度（150ms 后按鼠标落点决定关/留）。
+                // 否则从目录行滑到文件行时，已打开的子列表会一直挂着不关
+                if (_onScheduleCloseAfter != null) _onScheduleCloseAfter(_level);
+                SchedulePreview(row);
+            }
         }
 
         private void OnRowLeave(RowLabel row)
@@ -3519,14 +3598,50 @@ namespace HoverExplorer
             _hoverPath = null;
         }
 
+        // 拖拽悬停文件夹（弹簧式文件夹）：OLE 拖拽期间 MouseEnter/MouseMove 不触发，
+        // 常规行悬停调度失效，由 DragOver 自行调度——拖停 ~500ms 后打开该文件夹的级联
+        // 子列表（列出其内容=子文件夹也在列表中），子列表与其中的文件夹行同样允许放置，
+        // 可连续导航到更深层再放置。面板保持依赖 MaybeClose 的 IsDragging 豁免
+        private void ScheduleDragSub(RowLabel row)
+        {
+            if (_dragSubRow == row && _dragSubTimer != null) return;   // 该行已在计时
+            CancelDragSub();
+            _dragSubRow = row;
+            _dragSubTimer = new Timer { Interval = 500 };
+            _dragSubTimer.Tick += (s, e) =>
+            {
+                var t = _dragSubTimer; t.Stop(); t.Dispose(); _dragSubTimer = null;
+                var r = _dragSubRow; _dragSubRow = null;
+                if (r == null || r.IsDisposed || !r.IsDir || IsDisposed) return;
+                Program.DebugLog("[panel] drag-hover cascade level=" + _level + " " + r.Full);
+                if (_onOpenSub != null) _onOpenSub(this, _level, r.Full, r.PointToScreen(Point.Empty).Y);
+            };
+            _dragSubTimer.Start();
+        }
+
+        private void CancelDragSub(RowLabel row = null)
+        {
+            if (row != null && _dragSubRow != row) return;   // 已移到另一行：保留那行的调度
+            if (_dragSubTimer != null) { _dragSubTimer.Stop(); _dragSubTimer.Dispose(); _dragSubTimer = null; }
+            _dragSubRow = null;
+        }
+
 
         private void SchedulePreview(RowLabel row)
         {
             if (_previewForm != null && _previewPath == row.Full) { Program.DebugLog("[panel-preview] keep-existing level=" + _level + " " + row.Full); return; }
             Program.DebugLog("[panel-preview] schedule level=" + _level + " lang=" + I18n.Lang + " " + row.Full + " delay=" + Config.HoverDelayMs + " (hadTimer=" + (_previewTimer != null) + " hadForm=" + (_previewForm != null) + ")");
             CancelPreview();
+            // 切到另一个文件：立即关掉旧预览（含停止其音频）。否则旧音频会拖到新预览
+            // 异步生成完（解码波形等耗时）才在 ShowPreview 里被关，出现“新卡片已出、旧还在响”
+            if (_previewForm != null && !_previewForm.Pinned) ClosePreviewForm();
             _previewPath = row.Full;
-            _previewTimer = new Timer { Interval = Config.HoverDelayMs };
+            // 音频预览出声要快：缩短触发延迟（图片等较重预览仍用常规防误触延迟），
+            // 让 MediaElement 更早开始打开文件；剩余延迟来自 WPF 打开大/无索引 MP3 本身
+            int previewDelay = Config.HoverDelayMs;
+            foreach (var e in Config.AudioExts)
+                if (row.Full.EndsWith(e, StringComparison.OrdinalIgnoreCase)) { previewDelay = Math.Min(previewDelay, 100); break; }
+            _previewTimer = new Timer { Interval = previewDelay };
             _previewTimer.Tick += (s, e) => { _previewTimer.Stop(); _previewTimer.Dispose(); _previewTimer = null; if (Config.AltSuppressHover && (Control.ModifierKeys & Keys.Alt) == Keys.Alt) { Program.DebugLog("[panel-preview] timer-fired 但 Alt 按住，取消 level=" + _level + " " + row.Full); return; } Program.DebugLog("[panel-preview] timer-fired level=" + _level + " " + row.Full); ShowPreview(row); };
             _previewTimer.Start();
         }
@@ -3562,9 +3677,17 @@ namespace HoverExplorer
                 NativeMethods.GetCursorPos(out pt);
                 bool inPv = _previewForm != null && _previewForm.ContainsPoint(pt.X, pt.Y);
                 bool pinned = _previewForm != null && _previewForm.Pinned;
-                Program.DebugLog("[panel-preview] close-check level=" + _level + " mouse=" + pt.X + "," + pt.Y + " inPreview=" + inPv + " pinned=" + pinned + " formAlive=" + (_previewForm != null));
+                // 互换布局：鼠标在本面板左侧按钮列（安全区）驻留/横穿时视同仍在面板——
+                // 预览保持开启并继续监控，移出面板后走正常关闭
+                bool inSideHold = false;
+                if (!inPv && _previewForm != null && Config.RowSwapSides && !pinned)
+                {
+                    var ps = PointToScreen(Point.Empty);
+                    inSideHold = pt.X >= ps.X && pt.X < ps.X + _rowSideZone && pt.Y >= ps.Y && pt.Y < ps.Y + Height;
+                }
+                Program.DebugLog("[panel-preview] close-check level=" + _level + " mouse=" + pt.X + "," + pt.Y + " inPreview=" + inPv + " inSideHold=" + inSideHold + " pinned=" + pinned + " formAlive=" + (_previewForm != null));
                 if (pinned) return;
-                if (_previewForm != null && inPv)
+                if (_previewForm != null && (inPv || inSideHold))
                     SchedulePreviewClose();
                 else if (Config.KeepOnLeave && !InAnyHoverPanel(pt.X, pt.Y))
                 {
@@ -3638,6 +3761,7 @@ namespace HoverExplorer
                             NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
                         NativeMethods.POINT _spt; NativeMethods.GetCursorPos(out _spt);
                         Program.DebugLog("[panel-preview] SHOW level=" + _level + " " + full + " at " + _previewForm.Left + "," + _previewForm.Top + " size " + _previewForm.Width + "x" + _previewForm.Height + " mouse=" + _spt.X + "," + _spt.Y);
+
                     });
                 }
                 catch (Exception ex) { Program.DebugLog("[panel-preview] generate-exception level=" + _level + " " + full + " " + ex.Message); }
@@ -4000,7 +4124,13 @@ namespace HoverExplorer
                         {
                             Program.DebugLog("[row] side-zone hold level=" + _level + " " + row.Name);
                             CancelHover();
-                            CancelPreview();
+                            // 不弹新不杀旧：只取消未触发的预览调度；已开的预览窗保留——
+                            // 互换布局下鼠标从文件名横穿按钮列去左侧预览，半路不再被杀
+                            if (_previewTimer != null)
+                            {
+                                _previewTimer.Stop(); _previewTimer.Dispose(); _previewTimer = null;
+                                _previewPath = null;
+                            }
                         }
                     }
                     else if (_hoverTimer == null && _previewTimer == null && _previewForm == null)
@@ -4183,6 +4313,9 @@ namespace HoverExplorer
             if (_listPanel != null) keepScroll = ((SlimScrollPanel)_listPanel).ContentScrollPos;
             BackColor = Config.ListBg;
             Win11.Apply(Handle, Config.Theme != "light", Config.Border);
+            // 切配色/主题后窗口已存在，WinForms 不会自动重发 WM_NCPAINT，主动重算并重画
+            // 非客户区描边（圆角模式才有描边；直角模式无副作用），否则边框卡在旧色
+            Win11.RefreshNc(Handle);
             int x = Location.X, y = Location.Y;
             ShowPanel(_path, x, y);
             if (keepScroll > 0 && _listPanel != null)
@@ -4284,8 +4417,9 @@ namespace HoverExplorer
             var tb = new TextBox
             {
                 Font = row.Font,
-                BackColor = Config.BG,
-                ForeColor = Config.FG,
+                BackColor = Config.ListBg,
+                ForeColor = Config.ListFg,
+                Tag = "noTint",
                 BorderStyle = BorderStyle.FixedSingle,
                 Location = new Point(row.Location.X, row.Location.Y),
                 Size = new Size(row.Width, Math.Max(22, row.Height)),

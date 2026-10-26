@@ -72,6 +72,9 @@ namespace HoverExplorer
         {
             var g = e.Graphics;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None; // 直角，无抗锯齿边缘
+            // 先填背景：避免 SupportsTransparentBackColor 重画父窗体背景（tint 的浅色混色），
+            // 让滚动条与压在下面的行区容器同色。轨道仍是半透明黑叠加，视觉效果不变
+            using (var b = new SolidBrush(BackColor)) g.FillRectangle(b, 0, 0, Width, Height);
             if (_style == BarStyle.Block)
                 using (var b = new SolidBrush(TrackColor)) g.FillRectangle(b, Width - 8, 0, 8, Height);
             else if (_style == BarStyle.Line)

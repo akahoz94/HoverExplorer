@@ -19,6 +19,79 @@ namespace HoverExplorer
 {
 internal static class MediaPreview
 {
+    // ===== 倍速 =====
+    // 档位循环：慢 → 快 → 回到慢
+    internal static readonly double[] SpeedSteps = { 0.5, 0.75, 1.0, 1.5, 2.0 };
+
+    internal static double NextSpeed(double cur)
+    {
+        for (int i = 0; i < SpeedSteps.Length; i++)
+            if (Math.Abs(SpeedSteps[i] - cur) < 0.001) return SpeedSteps[(i + 1) % SpeedSteps.Length];
+        return 1.0;
+    }
+
+    internal static string SpeedText(double s)
+    {
+        string t = (s == Math.Floor(s)) ? ((int)s).ToString() : s.ToString("0.##");
+        return t + "×";
+    }
+
+    // 倍速按钮：显示当前倍速，点击循环下一档
+    internal static Button SpeedButton(Action<double> apply)
+    {
+        var b = new Button
+        {
+            Text = SpeedText(1.0),
+            Width = 46,
+            Dock = DockStyle.Left,
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Config.FG,
+            BackColor = Config.BG,
+            Font = new Font("Microsoft YaHei", 8),
+        };
+        b.FlatAppearance.BorderSize = 0;
+        b.FlatAppearance.MouseOverBackColor = Config.BgHover;
+        b.FlatAppearance.MouseDownBackColor = Config.BgHover;
+        Tips.Set(b, I18n.T("tip_speed"));
+        double cur = 1.0;
+        b.Click += delegate
+        {
+            cur = NextSpeed(cur);
+            b.Text = SpeedText(cur);
+            if (apply != null) { try { apply(cur); } catch { } }
+        };
+        return b;
+    }
+
+    // 关闭按钮：关掉承载的预览窗（播放会话随窗体 Dispose 一并停止）
+    internal static Button CloseButton(Control owner)
+    {
+        var b = new Button
+        {
+            Text = "✕",
+            Width = 30,
+            Dock = DockStyle.Right,
+            FlatStyle = FlatStyle.Flat,
+            ForeColor = Config.FG,
+            BackColor = Config.BG,
+            Font = new Font("Microsoft YaHei", 8),
+        };
+        b.FlatAppearance.BorderSize = 0;
+        b.FlatAppearance.MouseOverBackColor = Config.BgHover;
+        b.FlatAppearance.MouseDownBackColor = Config.BgHover;
+        Tips.Set(b, I18n.T("tip_close_preview"));
+        b.Click += delegate
+        {
+            try
+            {
+                var f = owner.FindForm();
+                if (f != null) f.Close();
+            }
+            catch { }
+        };
+        return b;
+    }
+
     internal static string TruncPath(string p)
     {
         if (string.IsNullOrEmpty(p)) return "";
@@ -87,6 +160,18 @@ internal static class MediaPreview
             catch { return null; }
         }
 
+        // 解码失败时的缩略图兜底：按面板实际宽度取图，避免放大后是拉糊的小图。
+        // 返回创建的 PictureBox（取不到缩略图时为 null），调用方负责在别的东西顶上时把它移除。
+        internal static PictureBox ShowThumbFallback(string path, WinPanel panel, WinControl host)
+        {
+            var thumb = ShellThumb(path, Math.Max(Config.PreviewMax * 2, panel.Width), false);
+            if (thumb == null) return null;
+            try { host.Hide(); } catch { }
+            var pb = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Image = thumb, BackColor = Color.Black };
+            panel.Controls.Add(pb);
+            return pb;
+        }
+
         // ===== WPF MediaElement 播放器（音频+视频统一，Media Foundation 解码，零部署）=====
         private static bool _wpfInited;
         internal static void EnsureWpf()
@@ -133,7 +218,8 @@ internal static class MediaPreview
             var host = session.HostView;
             host.Dock = DockStyle.Fill;
             panel.Controls.Add(host);
-            // Dock 按 z 序反序计算：宿主置底（索引 0）让它 Fill 残余区
+            // z 序里索引 0 是最前（BringToFront 就是移到 0），Dock 按 z 序从后往前排：
+            // 宿主在最前 → Fill 拿到除底栏外的全部区域。
             panel.Controls.SetChildIndex(host, 0);
             panel.Disposed += delegate { session.Close(); };
 
@@ -147,9 +233,14 @@ internal static class MediaPreview
             btn.FlatAppearance.MouseDownBackColor = Config.BgHover;
             var lblTime = new Label { Width = 110, Dock = DockStyle.Right, Text = I18n.T("media_loading"), TextAlign = ContentAlignment.MiddleRight, ForeColor = Config.FgDir, BackColor = Config.BG, AutoEllipsis = true, Font = new Font("Microsoft YaHei", 8) };
             var prog = new SeekBar { Dock = DockStyle.Fill };
+            var spd = SpeedButton(delegate(double r) { try { session.SpeedRatio = r; } catch { } });
+            var cls = CloseButton(panel);
+            // 加入顺序 = z 序；Dock 按 z 序反序算，最终视觉：[播放][倍速][进度][时间][关闭]
             bar.Controls.Add(prog);
+            bar.Controls.Add(spd);
             bar.Controls.Add(btn);
             bar.Controls.Add(lblTime);
+            bar.Controls.Add(cls);
             panel.Controls.Add(bar);
 
             session.Opened += delegate
@@ -174,19 +265,110 @@ internal static class MediaPreview
                     catch { }
                 }
             };
+            // ===== 视频解码兜底 =====
+            // 两条路：① 系统解码器（Media Foundation）默认，快且带声音；
+            //          ② ffmpeg 帧流 —— 系统解不了时顶上（ProRes / 10bit / 4:2:2 / HEVC 等）。
+            // 并行探一次编码信息：探到系统一定解不了，就不等 MediaFailed 白等一次，直接切 ffmpeg。
+            bool ffmpegStarted = false;
+            bool thumbShown = false;
+            PictureBox thumbBox = null;
+            VideoInfo probed = null;
+
+            // force=true：ffmpeg 也失败了，这是最后一张救命图，必须试。
+            Action<bool> showThumb = delegate(bool force)
+            {
+                if (thumbShown) return;
+                // 探测已判定"系统解码器一定解不了"时不必再取 Shell 缩略图：
+                // Shell 缩略图处理器走的正是同一条 Media Foundation 解码路，对这类文件必然取不到图，
+                // 白白在 UI 线程上做一次 COM 调用（高码流文件首次取图还可能很慢）。
+                if (!force && probed != null) return;
+                thumbShown = true;
+                Program.DebugLog("[mp] show-thumb " + MediaPreview.TruncPath(path));
+                thumbBox = ShowThumbFallback(path, panel, host);
+            };
+
+            Action switchToFfmpeg = delegate
+            {
+                if (ffmpegStarted) return;
+                if (FfmpegTools.FindFfmpeg() == null) return;   // 没装 ffmpeg → 保持缩略图
+                ffmpegStarted = true;
+                try
+                {
+                    Program.DebugLog("[ffmpeg-video] swap start " + MediaPreview.TruncPath(path));
+                    // 宿主隐藏 + 退出 Dock 计算：ffmpeg 面板是 Dock=Fill 且排在最前，
+                    // 若宿主仍占着 Fill，剩余空间会被它吃光 → ffmpeg 面板拿到 0 面积（画面看不见）。
+                    try { host.Hide(); host.Dock = DockStyle.None; } catch { }
+                    var fv = new FfmpegVideoPanel(path, panel.Width, panel.Height, probed);
+                    fv.Dock = DockStyle.Fill;
+                    fv.Visible = false;                        // 首帧到达再显示，避免闪黑
+                    panel.Controls.Add(fv);
+                    panel.Controls.SetChildIndex(fv, 0);
+                    fv.VideoSizeKnown += delegate (int vw, int vh)
+                    {
+                        try
+                        {
+                            var form = panel.FindForm() as PreviewForm;
+                            if (form != null) form.FitVideoAspect(vw, vh);
+                        }
+                        catch { }
+                    };
+                    fv.FirstFrameReady += delegate
+                    {
+                        // 缩略图让位给真实画面；原 WPF 控制条让位给 ffmpeg 自带控制条
+                        if (thumbBox != null)
+                        {
+                            try { panel.Controls.Remove(thumbBox); thumbBox.Dispose(); } catch { }
+                            thumbBox = null;
+                        }
+                        try
+                        {
+                            bar.Hide();
+                            fv.Visible = true;
+                            fv.BringToFront();
+                        }
+                        catch { }
+                    };
+                    fv.Failed += delegate
+                    {
+                        // ffmpeg 也解不出来：回到缩略图（最后一张救命图，force 取）
+                        showThumb(true);
+                        if (thumbBox != null && !thumbBox.IsDisposed)
+                        {
+                            try { fv.Visible = false; thumbBox.Visible = true; thumbBox.BringToFront(); } catch { }
+                        }
+                    };
+                }
+                catch (Exception ex) { Program.DebugLog("[ffmpeg-video] swap fail " + ex.Message); }
+            };
+
             session.Failed += delegate
             {
-                // 解码失败才回退缩略图：按面板实际宽度取图，避免放大后是拉糊的小图
-                var thumb = ShellThumb(path, Math.Max(Config.PreviewMax * 2, panel.Width), false);
-                if (thumb != null)
-                {
-                    host.Hide();
-                    var pb = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Image = thumb, BackColor = Color.Black };
-                    panel.Controls.Add(pb);
-                }
+                // Media Foundation 解不了的规格，WPF MediaElement 会直接抛 MediaFailed。
+                // 先用 Shell 缩略图秒出兜底，再切到 ffmpeg 帧流解码。
                 btn.Enabled = false;
-                lblTime.Text = "解码失败";
+                lblTime.Text = I18n.T("media_decode_fail");
+                Program.DebugLog("[mp] media-failed " + MediaPreview.TruncPath(path));
+                if (!ffmpegStarted) showThumb(false);
+                switchToFfmpeg();
             };
+
+            // 并行探测：探到"系统一定解不了"就提前切 ffmpeg，省掉一次必然失败的 MediaElement 尝试
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                var info = VideoProbe.ProbeCached(path);
+                if (info == null || SystemDecoder.CanDecode(info)) return;   // 系统能解 → 等它自己开
+                probed = info;
+                try
+                {
+                    if (panel.IsDisposed) return;
+                    panel.BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (panel.IsDisposed) return;
+                        switchToFfmpeg();
+                    });
+                }
+                catch { }
+            });
             session.Ended += delegate { btn.Text = "▶"; };
 
             btn.Click += delegate
@@ -357,7 +539,8 @@ internal static class MediaPreview
         }
 
         // 自绘进度条：系统 ProgressBar 深色模式下无法着色；轨道用主题描边色，已播放部分用强调色
-        private class SeekBar : WinControl
+        // （internal：ffmpeg 帧流面板复用同款进度条）
+        internal class SeekBar : WinControl
         {
             private double _ratio;
             public double Ratio
@@ -512,6 +695,13 @@ internal static class MediaPreview
         public TimeSpan Position
         {
             get { try { return _me.Position; } catch { return TimeSpan.Zero; } }
+        }
+
+        // 倍速：WPF MediaElement 直接支持（1.0 = 正常）
+        public double SpeedRatio
+        {
+            get { try { return _me.SpeedRatio; } catch { return 1.0; } }
+            set { try { _me.SpeedRatio = value; } catch { } }
         }
 
         public void Play()

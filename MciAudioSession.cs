@@ -19,6 +19,7 @@ namespace HoverExplorer
         private readonly string _alias;
         private string _path;
         private bool _opened, _failed, _playing, _paused, _endedFired;
+        private double _speed = 1.0;
         private TimeSpan _total;
         private Timer _poll;
 
@@ -131,6 +132,20 @@ namespace HoverExplorer
         }
 
         public void Toggle() { if (IsPlaying) Pause(); else Play(); }
+
+        // 倍速：MCI 的 speed 以"正常速"为 1000（百分比），与 WPF 的 SpeedRatio 换算
+        public double SpeedRatio
+        {
+            get { return _speed; }
+            set
+            {
+                if (value < 0.25) value = 0.25;
+                if (value > 4.0) value = 4.0;
+                _speed = value;
+                if (!_opened || _failed) return;
+                mciSendString("set " + _alias + " speed " + (int)(value * 1000), null, 0, IntPtr.Zero);
+            }
+        }
 
         public void SeekRatio(double ratio)
         {

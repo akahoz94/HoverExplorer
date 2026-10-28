@@ -573,6 +573,9 @@ namespace HoverExplorer
         // ===== 音频预览专用（操作栏：播放键+全量波形；悬停展开信息区：标题/时间/meta）=====
         internal IMediaSession _audio;
         private Label _audioPlayBtn;
+        private Label _audioSpdBtn;      // 倍速
+        private Label _audioCloseBtn;    // 关闭预览窗
+        private int _audioSpdIdx = 2;    // SpeedSteps 索引，默认 1.0×
         private Label _audioTimeLbl;
         private Label _audioMetaLbl;
         private Label _audioNameLbl;
@@ -750,6 +753,44 @@ namespace HoverExplorer
                 UpdateAudioUi();
             };
             _toolbar.Controls.Add(_audioPlayBtn);
+
+            // 倍速 + 关闭：与视频播放器操作栏一致（音频栏空间有限，倍速按钮做窄）
+            _audioSpdBtn = new Label
+            {
+                Size = new Size(34, 18),
+                AutoSize = false,
+                Text = MediaPreview.SpeedText(1.0),
+                Font = new Font("Microsoft YaHei", 8f),
+                ForeColor = Config.FG,
+                BackColor = Color.Transparent,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand
+            };
+            _audioSpdBtn.Click += delegate
+            {
+                if (_audio == null) return;
+                _audioSpdIdx = ( _audioSpdIdx + 1) % MediaPreview.SpeedSteps.Length;
+                double r = MediaPreview.SpeedSteps[_audioSpdIdx];
+                _audioSpdBtn.Text = MediaPreview.SpeedText(r);
+                _audio.SpeedRatio = r;
+            };
+            Tips.Set(_audioSpdBtn, I18n.T("tip_speed"));
+            _toolbar.Controls.Add(_audioSpdBtn);
+
+            _audioCloseBtn = new Label
+            {
+                Size = new Size(18, 18),
+                AutoSize = false,
+                Text = "✕",
+                Font = new Font("Microsoft YaHei", 8f),
+                ForeColor = Config.FG,
+                BackColor = Color.Transparent,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand
+            };
+            _audioCloseBtn.Click += delegate { try { Close(); } catch { } };
+            Tips.Set(_audioCloseBtn, I18n.T("tip_close_preview"));
+            _toolbar.Controls.Add(_audioCloseBtn);
 
             // 操作栏中段即波形：点击/横向拖动 = seek；竖向拖动 = 移动窗口（拖动过即固定）
             _audioViz = new WaveView { BackColor = Config.BG };
@@ -1639,10 +1680,17 @@ namespace HoverExplorer
             _pinBtn.Location = new Point(_toolbar.Width - _pinBtn.Width - 4, btnY);
             if (_audio != null)
             {
-                // 音频操作栏：播放键 | 波形（占满中段，seek/移窗）| 固定此窗口
+                // 音频操作栏：播放键 | 波形（占满中段，seek/移窗）| 倍速 | 固定此窗口 | 关闭
                 _audioPlayBtn.Location = new Point(6, btnY);
                 int vx = 32;
                 int vw = _pinBtn.Left - vx - 6;
+                if (_audioSpdBtn != null)
+                {
+                    _audioSpdBtn.Location = new Point(_pinBtn.Left - _audioSpdBtn.Width - 2, btnY);
+                    vw = _audioSpdBtn.Left - vx - 6;
+                }
+                if (_audioCloseBtn != null)
+                    _audioCloseBtn.Location = new Point(_toolbar.Width - _audioCloseBtn.Width - 2, btnY);
                 if (vw < 40) vw = 40;
                 _audioViz.Location = new Point(vx, 8);
                 _audioViz.Size = new Size(vw, 18);

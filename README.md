@@ -37,6 +37,10 @@
 - **桌面悬停 / Desktop hover**: 鼠标悬停桌面文件夹 → 弹出文件列表，悬停文件 → 直接预览 — Hover desktop folder → file list; hover file → direct preview
 - **资源管理器悬停 / Explorer hover**: 资源管理器中悬停浏览（可选），详细/图标视图均可；详细视图默认仅图标/文件名区触发 — Hover inside Explorer (optional); works in details/icon views; details view triggers only on icon/name area
 - **文件预览 / File preview**: 图片、文本、代码、压缩包(zip/7z/rar)、Office、字体、exe、epub、音视频、SVG 等 — Images, text, code, archives (zip/7z/rar), Office, fonts, exe, epub, audio/video, SVG, etc.
+- **播放器倍速与关闭 / Player speed & close**: 播放条上可切 0.5×–2× 倍速（点击循环），一键 ✕ 关闭预览窗；视频/音频均支持 — Playback speed 0.5×–2× on the control bar (click to cycle) plus a ✕ to close the preview; video and audio
+- **按类型开关预览 / Preview types on-off**: 逐类开关要预览的文件类型（图片/视频/音频/文档/文本/压缩包/字体/其他），关掉的类型不再弹预览窗 — Toggle previews per type (image/video/audio/document/text/archive/font/other); disabled types never open a preview
+- **m4v 等移动端容器 / m4v & mobile containers**: 补齐 `.m4v` `.m4b` `.3gp` `.mts` `.m2ts` `.webm` `.flv` 等扩展名，直接出画面而非只有元数据 — Adds `.m4v` `.m4b` `.3gp` `.mts` `.m2ts` `.webm` `.flv` so they preview instead of showing metadata only
+- **高规格视频兜底解码 / High-spec video fallback**: 系统解码器打不开时（ProRes / 10bit / 4:2:2 / HEVC）自动改用 ffmpeg 帧流播放 — When the system decoder fails (ProRes / 10-bit / 4:2:2 / HEVC), falls back to an ffmpeg frame-stream player
 - **音频波形播放器 / Audio waveform**: 迷你播放条，波形即进度，MF 后台解码峰值/RMS，点击/拖动 seek — Mini player bar, waveform = progress, MF background peak/RMS decode, click/drag to seek
 - **收藏·历史列表 / Favorites · History**: 自定义触发区域或热键弹出常用文件夹；星标收藏；行悬停操作按钮；宽度可拖拽记忆 — Custom trigger area or hotkey; star to favorite; row hover action buttons; draggable width with memory
 - **关闭延迟可调 / Adjustable close delay**: 50–2000ms 统一控制列表/预览/收藏离开后关闭速度 — 50–2000ms unified close speed for list/preview/favorites after mouse leaves
@@ -94,6 +98,30 @@ Search: click panel to activate, then `Ctrl+F` to show search box (hidden by def
 
 Settings panel bottom has GitHub Releases and Baidu Netdisk download links.
 
+### 可选依赖：ffmpeg / Optional dependency: ffmpeg
+
+大部分视频用系统解码器（Media Foundation）直接播放，无需任何额外依赖。
+Windows 自带解码器的实际能力边界（实测）：H.264/HEVC **只支持 8bit 4:2:0**，
+`yuv420p10le` / `yuv422p` / `yuv422p10le` / ProRes（Proxy·HQ·4444）等一律打不开。
+只有这些"系统解不了"的规格才需要 ffmpeg 兜底：程序自动探测常见安装位置，
+探测不到时该类视频只能显示缩略图。
+可在 **设置 → 预览类型 → ffmpeg 路径** 指定 ffmpeg 可执行文件位置（留空=自动探测）。
+
+> 兜底通道只解画面、不出声；系统解码器能开的文件仍走原生通道（带声音）。
+> 码流高本身不是问题 —— 42 Mbps 的 8bit 4:2:0 文件系统解码器直接就播；
+> 决定生死的是像素格式与编码（ProRes / 10bit / 4:2:2）。
+
+Most videos play through the system decoder (Media Foundation) with no extra dependency.
+Windows' built-in decoder only handles 8-bit 4:2:0 for H.264/HEVC — `yuv420p10le`,
+`yuv422p`, `yuv422p10le` and ProRes (Proxy/HQ/4444) all fail to open.
+Only those "system can't decode" specs need ffmpeg as a fallback: the app auto-detects common
+install locations, and without it those videos fall back to a thumbnail.
+Set an explicit path under **Settings → Preview types → ffmpeg path** (leave empty to auto-detect).
+
+> The fallback channel decodes picture only (no audio); files the system decoder can open still
+> use the native path (with sound). High bitrate itself is not the problem — a 42 Mbps 8-bit
+> 4:2:0 file opens natively; what matters is pixel format and codec.
+
 ## 快捷键 / Hotkey
 
 默认 `Ctrl+Alt+Q`，功能为**切换悬停启用/禁用**。
@@ -133,6 +161,7 @@ $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 | `Win11.cs` | DWM 毛玻璃/圆角/暗色标题区 — DWM blur/rounded corners/dark caption |
 | `SettingsForm.cs` | 设置面板（即改即生效） — Settings panel (live) |
 | `MediaPreview.cs` | 音视频播放、波形/频谱、SVG、自绘进度条 — Audio/video play, waveform/spectrum, SVG, progress |
+| `MediaDecoder.cs` | ffmpeg 定位/视频探测/帧流兜底播放器（系统解码器打不开时） — ffmpeg lookup, video probe, frame-stream fallback player |
 | `WaveDecoder.cs` | 音频全量波形：MF 解码 + 峰值/RMS — Full waveform: MF decode + peak/RMS |
 | `EntryListForm.cs` | 收藏·历史列表 — Favorites · History list |
 | `PanelPalette.cs` | 面板/预览窗语义配色 — Panel/preview semantic colors |

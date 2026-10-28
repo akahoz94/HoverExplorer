@@ -8,6 +8,25 @@ namespace HoverExplorer
 {
     internal static class Config
     {
+        // 预览类别：设置面板逐类开关用；与 PreviewProvider 的分派分支一一对应
+        public enum PreviewKind { Image, Video, Audio, Document, Text, Archive, Font, Other }
+
+        // 某类是否允许预览（关掉后该类文件不再弹预览窗）
+        public static bool PreviewEnabled(PreviewKind kind)
+        {
+            switch (kind)
+            {
+                case PreviewKind.Image: return PreviewImage;
+                case PreviewKind.Video: return PreviewVideo;
+                case PreviewKind.Audio: return PreviewAudio;
+                case PreviewKind.Document: return PreviewDocument;
+                case PreviewKind.Text: return PreviewText;
+                case PreviewKind.Archive: return PreviewArchive;
+                case PreviewKind.Font: return PreviewFont;
+                default: return PreviewOther;
+            }
+        }
+
         public static readonly HashSet<string> ImgExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp" };
         public static readonly HashSet<string> IcoExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -27,9 +46,17 @@ namespace HoverExplorer
         public static readonly HashSet<string> EpubExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".epub" };
         public static readonly HashSet<string> AudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { ".mp3", ".wav", ".wma", ".m4a" };
+        { ".mp3", ".wav", ".wma", ".m4a", ".flac", ".aac", ".ogg", ".opus" };
+        // 视频扩展名：.m4v 是 iTunes/索尼设备常用的 MP4 变体（品牌与 .mp4 完全一致，
+        // 只是扩展名不同），此前未列入导致只出元数据不出画面。补齐移动端与广播常见容器。
         public static readonly HashSet<string> VideoExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { ".mp4", ".mkv", ".avi", ".mov", ".wmv" };
+        { ".mp4", ".mkv", ".avi", ".mov", ".wmv",
+          ".m4v", ".m4b", ".m4p",                       // iTunes/索尼变体
+          ".3gp", ".3g2", ".3gpp",                      // 手机
+          ".flv", ".f4v", ".webm", ".ogv", ".ogm",      // 流媒体容器
+          ".ts", ".m2ts", ".mts", ".m2t",               // 索尼/松下摄录机
+          ".vob", ".mpg", ".mpeg", ".mpe", ".m1v", ".m2v", ".mp2", ".m2p",
+          ".asf", ".rm", ".rmvb", ".divx", ".xvid", ".dv", ".f4v" };
         public static readonly HashSet<string> SvgExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".svg" };
         public static int PreviewDelay = 400;
@@ -84,6 +111,19 @@ namespace HoverExplorer
         // 2=日期↑ 3=日期↓ 4=大小↑ 5=大小↓ 6=扩展名↑ 7=扩展名↓。ini 推测不准时由用户显式指定
         public static int TcSortMode = -1;
         public static bool PreviewFiles = true;
+        // ===== 预览分类开关（参考 QTTabBar 的"按类型预览"：逐类开关，不必整体禁用）=====
+        // 关掉某类后该类文件悬停不再弹预览窗（CanPreview 直接判否，不占延时也不弹空窗）
+        public static bool PreviewImage = true;
+        public static bool PreviewVideo = true;
+        public static bool PreviewAudio = true;
+        public static bool PreviewDocument = true;
+        public static bool PreviewText = true;
+        public static bool PreviewArchive = true;
+        public static bool PreviewFont = true;
+        public static bool PreviewOther = true;
+        // ffmpeg 可执行文件路径（留空=自动探测）：用于解码 Media Foundation 解不了的
+        // 高规格视频（10bit 4:2:2 / HEVC / 超高码率），以及作为解码兜底
+        public static string FfmpegPath = "";
         public static bool DebugLog = false;
         public static bool HideTooltip = false;
         // 列表/预览窗口的按钮提示（tooltip），可在托盘菜单关闭
@@ -353,6 +393,15 @@ namespace HoverExplorer
                         case "TcEnabled": TcEnabled = Convert.ToBoolean(v); break;
                         case "TcSortMode": TcSortMode = Convert.ToInt32(v); break;
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
+                        case "PreviewImage": PreviewImage = Convert.ToBoolean(v); break;
+                        case "PreviewVideo": PreviewVideo = Convert.ToBoolean(v); break;
+                        case "PreviewAudio": PreviewAudio = Convert.ToBoolean(v); break;
+                        case "PreviewDocument": PreviewDocument = Convert.ToBoolean(v); break;
+                        case "PreviewText": PreviewText = Convert.ToBoolean(v); break;
+                        case "PreviewArchive": PreviewArchive = Convert.ToBoolean(v); break;
+                        case "PreviewFont": PreviewFont = Convert.ToBoolean(v); break;
+                        case "PreviewOther": PreviewOther = Convert.ToBoolean(v); break;
+                        case "FfmpegPath": FfmpegPath = Convert.ToString(v); break;
                         case "DebugLog": DebugLog = Convert.ToBoolean(v); break;
                         case "HideTooltip": HideTooltip = Convert.ToBoolean(v); break;
                         case "ShowTips": ShowTips = Convert.ToBoolean(v); break;
@@ -434,6 +483,15 @@ namespace HoverExplorer
                 data["TcEnabled"] = TcEnabled;
                 data["TcSortMode"] = TcSortMode;
                 data["PreviewFiles"] = PreviewFiles;
+                data["PreviewImage"] = PreviewImage;
+                data["PreviewVideo"] = PreviewVideo;
+                data["PreviewAudio"] = PreviewAudio;
+                data["PreviewDocument"] = PreviewDocument;
+                data["PreviewText"] = PreviewText;
+                data["PreviewArchive"] = PreviewArchive;
+                data["PreviewFont"] = PreviewFont;
+                data["PreviewOther"] = PreviewOther;
+                data["FfmpegPath"] = FfmpegPath;
                 data["DebugLog"] = DebugLog;
                 data["HideTooltip"] = HideTooltip;
                 data["ShowTips"] = ShowTips;

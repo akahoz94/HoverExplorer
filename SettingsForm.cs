@@ -24,6 +24,7 @@ namespace HoverExplorer
         private AccGroup _entryGroup;
         private AccGroup _sortGroup;
         private AccGroup _tcGroup;
+        private AccGroup _pvTypeGroup;
         private ViewportPanel _viewport;
         private FlowLayoutPanel _scrollPanel;
         private SlimScrollBar _scrollBar;
@@ -37,6 +38,17 @@ namespace HoverExplorer
         private ToggleSwitch _rowSwapToggle;
         private ToggleSwitch _altSuppressToggle;
         private ToggleSwitch _entryToggle;
+        // 预览类型分类开关（图片/视频/音频/文档/文本/压缩包/字体/其他）
+        private ToggleSwitch _pvImageToggle;
+        private ToggleSwitch _pvVideoToggle;
+        private ToggleSwitch _pvAudioToggle;
+        private ToggleSwitch _pvDocToggle;
+        private ToggleSwitch _pvTextToggle;
+        private ToggleSwitch _pvArchiveToggle;
+        private ToggleSwitch _pvFontToggle;
+        private ToggleSwitch _pvOtherToggle;
+        private TextBox _ffmpegPathBox;
+        private Label _ffmpegStatusLbl;
         private HotkeyPill _hoverPill;
         private HotkeyPill _cardPill;
         private HotkeyPill _entryPill;
@@ -330,6 +342,94 @@ namespace HoverExplorer
             _fnUpdatePauseLbl();
 
             _hoverGroup.FinishRows();
+
+
+            // ==== 组：预览类型（逐类开关，参考 QTTabBar 的"按类型预览"设置）====
+            _pvTypeGroup = _fnNewGroup(I18n.T("group_preview_types"), false);
+            y = 8;
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_types_desc"), null, null);
+
+            _pvImageToggle = new ToggleSwitch { On = Config.PreviewImage };
+            _pvImageToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_image"), null, _pvImageToggle);
+
+            _pvVideoToggle = new ToggleSwitch { On = Config.PreviewVideo };
+            _pvVideoToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_video"), null, _pvVideoToggle);
+
+            _pvAudioToggle = new ToggleSwitch { On = Config.PreviewAudio };
+            _pvAudioToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_audio"), null, _pvAudioToggle);
+
+            _pvDocToggle = new ToggleSwitch { On = Config.PreviewDocument };
+            _pvDocToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_document"), null, _pvDocToggle);
+
+            _pvTextToggle = new ToggleSwitch { On = Config.PreviewText };
+            _pvTextToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_text"), null, _pvTextToggle);
+
+            _pvArchiveToggle = new ToggleSwitch { On = Config.PreviewArchive };
+            _pvArchiveToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_archive"), null, _pvArchiveToggle);
+
+            _pvFontToggle = new ToggleSwitch { On = Config.PreviewFont };
+            _pvFontToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_font"), null, _pvFontToggle);
+
+            _pvOtherToggle = new ToggleSwitch { On = Config.PreviewOther };
+            _pvOtherToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_other"), null, _pvOtherToggle);
+
+            // ffmpeg 路径（留空=自动探测）：用于解码系统解码器不支持的高规格视频
+            _ffmpegPathBox = new TextBox
+            {
+                Text = Config.FfmpegPath,
+                Font = new Font("Consolas", 8.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+            };
+            _ffmpegPathBox.Size = new Size(150, 22);
+            var ffAutoBtn = new Button
+            {
+                Text = I18n.T("ffmpeg_auto"),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, 8.5f),
+                Size = new Size(48, 22),
+                Cursor = Cursors.Hand,
+            };
+            ffAutoBtn.FlatAppearance.BorderColor = Config.Border;
+            ffAutoBtn.Click += (s, e) => { _ffmpegPathBox.Text = ""; _fnApplySettings(false, false); };
+            var ffRow = new Panel { Size = new Size(206, 24), BackColor = Config.BG };
+            _ffmpegPathBox.Location = new Point(0, 1);
+            ffAutoBtn.Location = new Point(156, 0);
+            ffRow.Controls.Add(_ffmpegPathBox);
+            ffRow.Controls.Add(ffAutoBtn);
+            y = _pvTypeGroup.AddRow(y, I18n.T("ffmpeg_path_row"), I18n.T("ffmpeg_path_desc"), ffRow);
+
+            // 路径失焦即生效
+            _ffmpegPathBox.LostFocus += (s, e) => { _fnApplySettings(false, false); };
+            _ffmpegPathBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { _ffmpegPathBox.Text = _ffmpegPathBox.Text.Trim(); _fnApplySettings(false, false); } };
+
+            // ffmpeg 探测状态：让用户知道兜底解码到底能不能用
+            int ffStatusY = y;
+            _ffmpegStatusLbl = new Label
+            {
+                Location = new Point(AccGroup.InL, AccGroup.HeadH + ffStatusY + 2),
+                AutoSize = true,
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub"
+            };
+            _pvTypeGroup.Controls.Add(_ffmpegStatusLbl);
+            _pvTypeGroup.ExpandRow(ffStatusY, 20);
+            y = ffStatusY + 20;
+            _fnUpdateFfmpegStatus();
+
+            _pvTypeGroup.FinishRows();
 
 
             // ==== 组：列表配色 ====
@@ -943,6 +1043,16 @@ namespace HoverExplorer
             }
         }
 
+        // ffmpeg 探测状态：显示实际用到的可执行文件；找不到时给出提示（兜底解码不可用）
+        private void _fnUpdateFfmpegStatus()
+        {
+            if (_ffmpegStatusLbl == null) return;
+            string exe = FfmpegTools.FindFfmpeg();
+            _ffmpegStatusLbl.Text = string.IsNullOrEmpty(exe)
+                ? I18n.T("ffmpeg_status_missing")
+                : I18n.T("ffmpeg_found", exe);
+        }
+
         private void _fnUpdateAreaLbl()
         {
             if (_areaLbl == null) return;
@@ -982,6 +1092,25 @@ namespace HoverExplorer
             Config.EntryRectW = _entryRect.Width;
             Config.EntryRectH = _entryRect.Height;
             Config.EntryRectColor = _entryColor;
+            // 预览类型分类开关（关掉的类别不再弹预览窗）
+            if (_pvImageToggle != null) Config.PreviewImage = _pvImageToggle.On;
+            if (_pvVideoToggle != null) Config.PreviewVideo = _pvVideoToggle.On;
+            if (_pvAudioToggle != null) Config.PreviewAudio = _pvAudioToggle.On;
+            if (_pvDocToggle != null) Config.PreviewDocument = _pvDocToggle.On;
+            if (_pvTextToggle != null) Config.PreviewText = _pvTextToggle.On;
+            if (_pvArchiveToggle != null) Config.PreviewArchive = _pvArchiveToggle.On;
+            if (_pvFontToggle != null) Config.PreviewFont = _pvFontToggle.On;
+            if (_pvOtherToggle != null) Config.PreviewOther = _pvOtherToggle.On;
+            if (_ffmpegPathBox != null)
+            {
+                string fp = (_ffmpegPathBox.Text ?? "").Trim();
+                if (fp != Config.FfmpegPath)
+                {
+                    Config.FfmpegPath = fp;
+                    FfmpegTools.ResetCache();   // 路径变了要重新探测 ffmpeg
+                    _fnUpdateFfmpegStatus();
+                }
+            }
             Program.ApplySettingsLive(hotkeys, panels);
         }
 

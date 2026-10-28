@@ -23,6 +23,7 @@ namespace HoverExplorer
         int NaturalWidth { get; }
         int NaturalHeight { get; }
         TimeSpan Position { get; }
+        double SpeedRatio { get; set; }
         void Play();
         void Pause();
         void Toggle();

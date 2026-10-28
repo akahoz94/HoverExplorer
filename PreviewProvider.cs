@@ -32,15 +32,32 @@ namespace HoverExplorer
 
     internal static class PreviewProvider
     {
+        // 该扩展名属于哪一类预览——与设置面板里的分类开关一一对应
+        internal static Config.PreviewKind KindOf(string ext)
+        {
+            if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext)) return Config.PreviewKind.Image;
+            if (Config.VideoExts.Contains(ext)) return Config.PreviewKind.Video;
+            if (Config.AudioExts.Contains(ext)) return Config.PreviewKind.Audio;
+            if (Config.OfficeExts.Contains(ext) || Config.EpubExts.Contains(ext)) return Config.PreviewKind.Document;
+            if (Config.FontExts.Contains(ext)) return Config.PreviewKind.Font;
+            if (Config.ZipExts.Contains(ext) || Config.SevenZipExts.Contains(ext)) return Config.PreviewKind.Archive;
+            if (Config.TextExts.Contains(ext) || ext == ".csv") return Config.PreviewKind.Text;
+            return Config.PreviewKind.Other;
+        }
+
         public static bool CanPreview(string path)
         {
             if (path == null) return false;
-            return File.Exists(path);
+            if (!File.Exists(path)) return false;
+            // 分类开关：该类被关掉就直接不预览——既不占悬停延时，也不弹空窗
+            return Config.PreviewEnabled(KindOf(Path.GetExtension(path).ToLowerInvariant()));
         }
 
         public static PreviewResult Generate(string full)
         {
             string ext = Path.GetExtension(full).ToLowerInvariant();
+            // 该类预览被关掉 → 不生成任何内容
+            if (!Config.PreviewEnabled(KindOf(ext))) return null;
             if (Config.ImgExts.Contains(ext) || Config.IcoExts.Contains(ext)) return GenImage(full);
             if (Config.VideoExts.Contains(ext)) return GenVideo(full);
             if (Config.SvgExts.Contains(ext)) return GenSvg(full);

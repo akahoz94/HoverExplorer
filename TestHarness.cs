@@ -16,6 +16,9 @@ namespace HoverExplorer
                 Console.Write("[测试] " + Path.GetFileName(path) + " ... ");
                 try
                 {
+                    // 该类型被设置里关掉时 Generate 返回 null —— 属于预期行为，不算失败
+                    var kind = PreviewProvider.KindOf(Path.GetExtension(path).ToLowerInvariant());
+                    if (!Config.PreviewEnabled(kind)) { Console.WriteLine("该类型预览已关闭（跳过）"); continue; }
                     var r = PreviewProvider.Generate(path);
                     if (r == null) { Console.WriteLine("null"); fail++; continue; }
                     if (r.Kind == PreviewResult.KindEnum.Image)

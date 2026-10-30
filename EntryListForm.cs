@@ -596,7 +596,7 @@ namespace HoverExplorer
                     // 拖拽会话中（左键按住，含 OLE 拖放途经）：列表是放置目标，鼠标不在列表上也保持
                     if ((NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0) { missSince = 0; return; }
                     bool inside = _fnListContainsCursor();
-                    if (!inside && Config.EntryRectW >= 20 && Config.EntryRectH >= 20)
+                    if (!inside && Config.EntryRectW >= 5 && Config.EntryRectH >= 5)
                     {
                         // 鼠标仍在触发区域内也保持：列表弹在区域下方，区内鼠标不在列表上是常态，
                         // 不保持会形成“弹出→关闭→再弹出”的循环
@@ -763,7 +763,7 @@ namespace HoverExplorer
         {
             var pal = CardPalettes.Get(_paletteIndex);
             if (pal == null) return;
-            BackColor = _hover ? pal.Hover : pal.Bg;
+            BackColor = CardPalette.Opaque(_hover ? pal.Hover : pal.Bg);
         }
 
         public void SetPalette(int index, bool persist)
@@ -777,6 +777,8 @@ namespace HoverExplorer
             _fnApplyPalette();
             Invalidate();
         }
+
+        public void ApplyPalette() { _fnApplyPalette(); Invalidate(); }
 
         public int CyclePalette(int dir)
         {
@@ -799,11 +801,12 @@ namespace HoverExplorer
         {
             base.OnPaint(e);
             var g = e.Graphics;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             int h = ClientSize.Height;
             var pal = CardPalettes.Get(_paletteIndex);
-            var tape = pal != null ? pal.Folder : Config.Accent;   // 左色条显示当前配色（palette 的文件夹类型色）
-            var fg = pal != null ? pal.Fg : Config.FG;
-            var border = pal != null ? pal.Border : Config.Border;
+            var tape = pal != null ? pal.StripColor : Config.Accent;   // 左色条显示当前配色
+            var fg = pal != null ? CardPalette.Opaque(pal.Fg) : Config.FG;
+            var border = pal != null ? pal.StripColor : Config.Border;
             // 左侧 6px 色条（palette 色，与桌面卡片同语言）
             using (var b = new SolidBrush(tape)) g.FillRectangle(b, 0, 0, 6, h);
             // 金色★徽章：16×16 色块 + 白星（收藏语义恒金色）
@@ -814,10 +817,11 @@ namespace HoverExplorer
                 g.DrawString("★", f, b, badge.X + (badge.Width - 10) / 2, badge.Y + (badge.Height - 12) / 2);
             // 标题：徽章右侧，垂直居中
             using (var f = new Font(Config.FontName, 9f))
-                TextRenderer.DrawText(g, I18n.T("entry_title"), f, new Point(36, (h - f.Height) / 2), fg);
+            using (var b = new SolidBrush(fg))
+                g.DrawString(I18n.T("entry_title"), f, b, 36, (h - f.Height) / 2);
             // 边框收尾（palette 自带宽度）
-            if (pal != null && pal.BorderWidth > 0)
-                using (var p = new Pen(border, pal.BorderWidth)) g.DrawRectangle(p, 0, 0, ClientSize.Width - 1, h - 1);
+            if (pal != null && pal.StripWidth > 0)
+                using (var p = new Pen(border, pal.StripWidth)) g.DrawRectangle(p, 0, 0, ClientSize.Width - 1, h - 1);
             else if (pal == null)
                 using (var p = new Pen(border)) g.DrawRectangle(p, 0, 0, ClientSize.Width - 1, h - 1);
         }
@@ -949,6 +953,7 @@ namespace HoverExplorer
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             var icon = PopupForm.GetEntryIcon();
             if (icon != null) g.DrawImage(icon, 6, (Height - icon.Height) / 2);
             // 星标：收藏=实心金（与桌面卡片★徽章同色），历史=描边弱化；悬停提亮
@@ -956,13 +961,11 @@ namespace HoverExplorer
             var starColor = IsFav ? StarLit : (_inStar ? Config.ListFg : Config.ListMu);
             TextRenderer.DrawText(g, IsFav ? "★" : "☆", sf, StarRect, starColor,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            // 名称限制在行宽内，过长中间省略（与文件列表一致），不再溢出/撑宽
-            // TextRenderer 垂直居中：与图标/星标的几何中心对齐（GDI+ DrawString 行距含内部留白会偏低）
+            // 名称限制在行宽内，过长中间省略；DrawString 抗锯齿（TextRenderer 在双缓冲位图上 ClearType 退化出锯齿）
             float availW = Width - 46 - 6;
-            var rcName = new Rectangle(46, 0, Math.Max(0, (int)availW), Height);
-            TextRenderer.DrawText(g, availW > 20 ? RowLabel.MidEllipsis(g, Name, Font, availW) : Name, Font,
-                rcName, ForeColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+            var displayName = availW > 20 ? RowLabel.MidEllipsis(g, Name, Font, availW) : Name;
+            using (var b = new SolidBrush(ForeColor))
+                g.DrawString(displayName, Font, b, 46, (Height - Font.Height) / 2);
         }
     }
 
@@ -1046,7 +1049,7 @@ namespace HoverExplorer
             base.OnMouseUp(e);
             if (!_dragging) return;
             _dragging = false;
-            if (_rect.Width >= 10 && _rect.Height >= 10)
+            if (_rect.Width >= 5 && _rect.Height >= 5)
             {
                 var picked = new Rectangle(RectangleToScreen(_rect).Location, _rect.Size);
                 DialogResult = DialogResult.OK;
@@ -1067,10 +1070,12 @@ namespace HoverExplorer
             base.OnPaint(e);
             if (_rect.Width > 0)
             {
-                using (var p = new Pen(Config.Accent, 2))
+                bool tooSmall = _rect.Width < 5 || _rect.Height < 5;
+                Color boxColor = tooSmall ? Color.Red : Config.Accent;
+                using (var p = new Pen(boxColor, 2))
                 {
                     e.Graphics.DrawRectangle(p, _rect);
-                    using (var b = new SolidBrush(Color.FromArgb(60, Config.Accent)))
+                    using (var b = new SolidBrush(Color.FromArgb(60, boxColor)))
                         e.Graphics.FillRectangle(b, _rect);
                 }
                 // 实时尺寸：跟随光标显示 宽 × 高（框选触发区/暂停区时即所见区域大小）

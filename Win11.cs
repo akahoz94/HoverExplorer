@@ -69,6 +69,21 @@ namespace HoverExplorer
             ApplyCornerPref(handle);
         }
 
+        // 分层窗口自绘阴影：清除 CS_DROPSHADOW 类样式，避免系统直角阴影与自绘圆角不协调
+        public static void RemoveDropShadow(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero) return;
+            SetClassLongPtrSafe(handle, GCL_STYLE, IntPtr.Zero);
+        }
+
+        // 分层窗口：禁用 DWM 非客户区渲染+边框（去掉 DWM 白色描边）
+        public static void RemoveNcBorder(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero || Build < 22000) return;
+            Set(handle, 2, 2);    // DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED（原误传 1=ALLOWED）
+            Set(handle, 34, -2);  // DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE (0xFFFFFFFE)
+        }
+
         // 对话框用：只要暗色模式与圆角，不加 CS_DROPSHADOW（否则下/右会出现硬边投影）
         public static void ApplyRounded(IntPtr handle, bool dark)
         {

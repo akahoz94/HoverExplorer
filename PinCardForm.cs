@@ -1,12 +1,17 @@
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace HoverExplorer
 {
-    // 桌面卡片·标签带样式（原型方案 D）：28px 高标签条 + 名字 + 类型色扩展名徽章 + 左 6px 色条。
-    // 宽度恒定（名字+徽章），悬停提亮一档，sub 与操作按钮组覆盖显示在卡片右端文字上（不右扩）。
+    // 桌面卡片·标签带样式（原型方案 D）：24px 高标签条 + 名字 + 扩展名徽章 + 左色条。
+    // 全自绘（分层窗口 WS_EX_LAYERED + UpdateLayeredWindow）→ 逐像素 Alpha 透明。
+    // 宽度恒定（名字+徽章），悬停提亮一档，sub 悬停显示在徽章右侧。
     // text 卡片：主操作=粘贴（MA_NOACTIVATE 不抢焦点 + 模拟 Ctrl+V 贴回原窗口），
     // 悬停 800ms 弹可编辑预览（复用 PreviewForm），关闭时写回内容。
     internal class PinCardForm : Form, IPaletteTarget
@@ -14,15 +19,19 @@ namespace HoverExplorer
         private readonly PinnedItem _item;
         private readonly string _path;   // = _item.Path，兼容外部按路径定位
         private readonly bool _isFile, _isUrl, _isText, _isDir;
-        private Color _typeColor;   // 按类型着色的色条/徽章色（随本卡片的配色变化）
+        private Color _typeColor;   // 保留字段兼容（已不按类型着色，统一用配色 StripColor）
         private int _paletteIndex;  // 本卡片自己的配色索引（滚轮切换只影响这张卡）
         private readonly bool _isToday;      // 今天修改过的文件 → 名字左侧状态点
         private string _name, _ext, _sub;
 
-        private Label _nameLbl, _extBadge, _subLbl;
+        // 布局矩形（自绘命中测试用）
+        private Rectangle _nameRect, _badgeRect, _subRect;
+        private Font _nameFont, _badgeFont, _subFont;
+        private bool _subVisible, _badgeHover, _badgeDown;
 
         private Point _dragStart, _formStart;
-        private bool _moved, _hover;
+        private bool _moved, _hover, _dropHighlight;
+        private const int ShadowPad = 2;   // 自绘阴影宽度（右下偏移，跟着圆角走）
 
         // 标签带配色：来自 CardPalettes（与面板主题 Config.Theme 无关，滚轮切换）
         private CardPalette _pal;
@@ -51,7 +60,7 @@ namespace HoverExplorer
             // 每张卡片记自己的配色；-1 的新卡片沿用默认（最近一次用过的配色）
             _paletteIndex = (item.Palette >= 0 && item.Palette < CardPalettes.All.Count)
                 ? item.Palette : Config.CardPaletteIndex;
-            _typeColor = _fnTypeColor(item, CardPalettes.Get(_paletteIndex));
+
             _fnApplyPaletteColors();
 
             FormBorderStyle = FormBorderStyle.None;
@@ -61,10 +70,7 @@ namespace HoverExplorer
             ShowInTaskbar = false;
             AutoScaleMode = AutoScaleMode.None;   // 高度按像素固定，禁止 DPI/字体缩放
 
-            BackColor = _bg;
-            ForeColor = _fg;
-            DoubleBuffered = true;
-            Height = 28;
+            Height = 24;
 
             // ----- 内容提取 -----
             long size = 0;
@@ -94,135 +100,70 @@ namespace HoverExplorer
             int nameW, subW, extW;
             using (var g = CreateGraphics())
             {
-                using (var fN = new Font("Microsoft YaHei", 9f))
-                using (var fS = new Font("Microsoft YaHei", 8f))
-                using (var fE = new Font("Microsoft YaHei", 8f, FontStyle.Bold))
-                {
-                    // 用 TextRenderer(GDI) 测量——Label 渲染走 GDI，GDI+ MeasureString 偏窄导致徽章截断
-                    nameW = Math.Min(TextRenderer.MeasureText(_name, fN).Width + 2, 260);
-                    subW = TextRenderer.MeasureText(_sub, fS).Width + 2;
-                    extW = TextRenderer.MeasureText(_ext, fE, new Size(200, 20), TextFormatFlags.NoPadding).Width + 8;
-                }
+
+                nameW = Math.Min(TextRenderer.MeasureText(_name, _nameFont).Width + 2, 260);
+                subW = TextRenderer.MeasureText(_sub, _subFont).Width + 2;
+                extW = TextRenderer.MeasureText(_ext, _badgeFont, new Size(200, 20), TextFormatFlags.NoPadding).Width + 8;
             }
             int x = _isToday ? 21 : 14;
-            _nameLbl = new Label
-            {
-                Location = new Point(x, 6),
-                Size = new Size(nameW, 16),
-                Text = _name,
-                Font = new Font("Microsoft YaHei", 9f),
-                ForeColor = _fg,
-                BackColor = _bg,
-                AutoEllipsis = true,
-            };
-            Controls.Add(_nameLbl);
+            _nameRect = new Rectangle(x, 4, nameW, 16);
+            _badgeRect = new Rectangle(x + nameW + 5, 3, extW, 18);   // 徽标比卡片矮(18/24)，上下留 3px 更像标签
+            _subRect = new Rectangle(_badgeRect.Right + 5, 5, Math.Max(subW, 30), 13);
+            Width = _badgeRect.Right + 8 + ShadowPad;
 
-            _extBadge = new Label
+            // ----- 事件（全自绘命中测试）-----
+            MouseDown += (s, e) =>
             {
-                Location = new Point(x + nameW + 5, 4),
-                Size = new Size(extW, 20),
-                Text = _ext,
-                Font = new Font("Microsoft YaHei", 8f, FontStyle.Bold),
-                BackColor = _badgeBg,
-                ForeColor = _badgeFg,
-                TextAlign = ContentAlignment.MiddleCenter,
-            };
-            Controls.Add(_extBadge);
-
-            Width = _extBadge.Right + 8;
-
-            // sub：悬停时显示在徽章右侧，空间不足截断（不改变卡片宽度）
-            _subLbl = new Label
-            {
-                Location = new Point(_extBadge.Right + 5, 8),
-                Size = new Size(Math.Max(subW, 30), 13),
-                Text = _sub,
-                Font = new Font("Microsoft YaHei", 8f),
-                ForeColor = _fgSub,
-                BackColor = _bg,
-                AutoEllipsis = true,
-                Visible = false,
-            };
-            Controls.Add(_subLbl);
-
-            // 徽章 = 执行入口：点击徽章执行主操作（file 打开 / url 打开 / text 粘贴）。
-            // hover 提亮提示可点；文件夹卡悬停 400ms 弹列表（卡片下方左对齐），
-            // 可预览文件卡悬停 800ms 弹内容预览（text 卡走整卡悬停预览，不重复）
-            _extBadge.Click += (s, e) => { if (_isText) _fnPaste(); else Run(); };
-            _extBadge.Cursor = Cursors.Hand;
-            _extBadge.MouseEnter += (s, e) => { _extBadge.BackColor = _fnLighten(_badgeBg, 0.25f); _fnScheduleBadgeAction(); };
-            _extBadge.MouseLeave += (s, e) => { _extBadge.BackColor = _badgeBg; if (_badgeTimer != null) _badgeTimer.Stop(); };
-
-            // ----- 拖动 + 右键/中键 -----
-            MouseEventHandler down = (s, e) =>
-            {
-                if (e.Button == MouseButtons.Left) { _dragStart = Cursor.Position; _formStart = Location; _moved = false; Capture = true; }
-            };
-            MouseEventHandler cardMouse = (s, e) =>
-            {
-                // 中键/右键前必须先放掉拖动捕获：右键弹的是 Shell 模态菜单，
-                // 若此时左键仍按下（Capture=true），模态循环会吞掉随后的 MouseUp，
-                // 窗口永久持有鼠标捕获 → 全系统单击失效
+                if (e.Button == MouseButtons.Left)
+                {
+                    if (_badgeRect.Contains(e.Location)) _badgeDown = true;
+                    else { _dragStart = Cursor.Position; _formStart = Location; _moved = false; Capture = true; }
+                }
                 if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right) ReleaseStuckDrag();
                 if (e.Button == MouseButtons.Middle) Program.Unpin(_item.Kind, _item.Path);
                 else if (e.Button == MouseButtons.Right)
                 {
-                    if (_isFile) ShellContextMenu.Show(_item.Path, Handle, () => Program.Unpin(_item.Kind, _item.Path));
+                    if (_isFile) ShellContextMenu.Show(_item.Path, Handle, () => Program.Unpin(_item.Kind, _item.Path), _fnAddPaletteFromClipboard);
                     else ShowCardMenu();
                 }
             };
-            MouseDown += down; MouseDown += cardMouse;
-            // 徽章不挂 down：Capture=true 会把鼠标消息路由到 Form，Label 收不到 MouseUp →
-            // Click 永不触发（实测徽章点击无反应的根因）。徽章专用于点击执行，拖动从名字区开始
-            foreach (Control c in new Control[] { _nameLbl, _subLbl })
-            {
-                c.MouseDown += down;
-                c.MouseDown += cardMouse;
-            }
-            _extBadge.MouseDown += cardMouse;
-            // 双击卡片 = 复制内容（file 复制路径 / url 复制链接 / text 复制全文）
-            EventHandler dblCopy = (s, e) =>
-            {
-                try { Clipboard.SetText(_item.Path); Program.ShowBalloon("HoverExplorer", I18n.T("card_copied")); } catch { }
-            };
-            DoubleClick += dblCopy;
-            foreach (Control c in new Control[] { _nameLbl, _subLbl }) c.DoubleClick += dblCopy;
             MouseMove += (s, e) =>
             {
+                // 徽标悬停跟踪
+                bool inBadge = _badgeRect.Contains(e.Location);
+                if (inBadge != _badgeHover)
+                {
+                    _badgeHover = inBadge;
+                    _fnRender();
+                    if (inBadge) _fnScheduleBadgeAction();
+                    else if (_badgeTimer != null) _badgeTimer.Stop();
+                }
+                Cursor = inBadge ? Cursors.Hand : Cursors.Default;
+                // 拖动
                 if (e.Button != MouseButtons.Left) return;
                 if (!_moved)
                 {
                     var d = Cursor.Position;
                     if (Math.Abs(d.X - _dragStart.X) > 6 || Math.Abs(d.Y - _dragStart.Y) > 6) _moved = true;
                 }
-                if (_moved)
-                {
-                    var d = Cursor.Position;
-                    Location = new Point(_formStart.X + d.X - _dragStart.X, _formStart.Y + d.Y - _dragStart.Y);
-
-                }
+                if (_moved) { var d = Cursor.Position; Location = new Point(_formStart.X + d.X - _dragStart.X, _formStart.Y + d.Y - _dragStart.Y); _fnRender(); }
             };
             MouseUp += (s, e) =>
             {
-                // 无条件释放捕获：只在 Left 分支释放时，一旦 MouseUp 丢失（被模态菜单、
-                // 焦点切换或窗口重排吞掉），本窗口会一直持有系统鼠标捕获，
-                // 所有点击都被路由到卡片 → 表现为整个系统单击失效，只能靠销毁窗口恢复
                 if (Capture) Capture = false;
                 if (e.Button == MouseButtons.Left)
                 {
+                    if (_badgeDown && !_moved && _badgeRect.Contains(e.Location))
+                    { if (_isText) _fnPaste(); else Run(); }
+                    _badgeDown = false;
                     if (_moved) Program.UpdatePinPos(_item.Kind, _item.Path, Left, Top);
                     _moved = false;
                 }
             };
-
-            // ----- 悬停：提亮 + sub 显示；text 卡 800ms 后弹可编辑预览 -----
-            // 关闭入口：中键点击卡片 / 右键菜单"取消固定"（外置关闭窗已移除）
+            DoubleClick += (s, e) => { try { Clipboard.SetText(_item.Path); Program.ShowBalloon("HoverExplorer", I18n.T("card_copied")); } catch { } };
             MouseEnter += (s, e) => _fnSetHover(true);
             MouseLeave += (s, e) => { if (!_fnCardContainsCursor()) _fnSetHover(false); };
 
-            // 卡片关闭（中键/Unpin/退出）时清理：预览窗口关掉、计时器停掉。
-            // 否则悬停期间关卡片：800ms 后预览照样弹出，且轮询对已 Dispose 的
-            // this 调 PointToClient 每 Tick 抛异常 → 预览永不自动关闭
             FormClosed += (s, e) =>
             {
                 if (_textPreviewTimer != null) { _textPreviewTimer.Stop(); _textPreviewTimer.Dispose(); _textPreviewTimer = null; }
@@ -235,41 +176,14 @@ namespace HoverExplorer
                 _fnCloseFilePreview();
             };
 
-            // 文件夹卡片：接受拖入的文件/目录，复制(默认)或移动(Shift)进该文件夹
-            // 子控件会挡住 form 的拖放事件，需对每个子控件单独启用 AllowDrop；
-            // 徽标例外 = 弹簧展开入口：拖文件停在徽标上 ~400ms 弹出该文件夹列表，
-            // 可继续拖进列表行/更深层子文件夹放置，徽标本身仍可直接落下（进本文件夹）
-            if (_isDir)
-            {
-                _fnEnableDrop(this);
-                foreach (Control c in Controls)
-                {
-                    if (c == _extBadge) _fnEnableBadgeDragExpand();
-                    else _fnEnableDrop(c);
-                }
-            }
+            // 文件夹卡片：接受拖入的文件/目录（分层窗口无子控件，form 级 AllowDrop 即可）
+            if (_isDir) _fnEnableDrop(this);
+
+            _fnRender();
         }
 
         // 徽标拖放 = 弹簧展开：DragOver 自行调度（OLE 拖拽期间 MouseEnter 不触发），
         // 拖停 ~400ms 调 _fnOpenFolderList（ShowCardFolderList 内部对已开同目录列表幂等）
-        private void _fnEnableBadgeDragExpand()
-        {
-            _extBadge.AllowDrop = true;
-            _extBadge.DragEnter += (s, e) =>
-            {
-                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
-                _fnScheduleBadgeDragOpen();
-            };
-            _extBadge.DragOver += (s, e) =>
-            {
-                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
-                _fnScheduleBadgeDragOpen();
-            };
-            _extBadge.DragLeave += (s, e) => _fnCancelBadgeDragOpen();
-            _extBadge.DragDrop += (s, e) => { _fnCancelBadgeDragOpen(); _fnHandleDrop(e); };
-        }
 
         private void _fnScheduleBadgeDragOpen()
         {
@@ -310,7 +224,7 @@ namespace HoverExplorer
         public void ApplyPalette()
         {
             _fnApplyPaletteColors();
-            Invalidate();
+            _fnRender();
         }
 
         public int PaletteIndex { get { return _paletteIndex; } }
@@ -330,34 +244,34 @@ namespace HoverExplorer
             if (n == 0) return;
             index = ((index % n) + n) % n;
             _paletteIndex = index;
-            _typeColor = _fnTypeColor(_item, CardPalettes.Get(index));
+
             _fnApplyPaletteColors();
-            Invalidate();
+            _fnRender();
             _item.Palette = index;
             // 同时作为新卡片的默认配色，下次钉的卡片沿用最近用过的这套
             Config.CardPaletteIndex = index;
             if (persist) Program.SaveConfigDebounced();
         }
 
-        // 按当前配色（CardPalettes.Current）算出本卡片的实际颜色。
-        // 文件夹卡片：整条填类型色 + 配色里的 folderText 作文字色，徽章反色
+        // 按当前配色算出本卡片的实际颜色（全自绘，支持 Alpha 透明）。
         private void _fnApplyPaletteColors()
         {
             _pal = CardPalettes.Get(_paletteIndex);
             if (_pal == null) return;
-            bool fd = _isDir;
-            _bg = fd ? _typeColor : _pal.Bg;
-            _bgHover = fd ? _fnLighten(_typeColor, 0.14f) : _pal.Hover;
-            _fg = fd ? _pal.FolderText : _pal.Fg;
-            _fgSub = fd ? CardPalette.Mix(_pal.FolderText, _typeColor, 0.35) : _pal.Sub;
-            _badgeBg = fd ? _pal.FolderText : _typeColor;
-            _badgeFg = fd ? _typeColor : _pal.BadgeText;
-
-            Color bg = _hover ? _bgHover : _bg;
-            BackColor = bg;
-            if (_nameLbl != null) { _nameLbl.BackColor = bg; _nameLbl.ForeColor = _fg; }
-            if (_subLbl != null) { _subLbl.BackColor = bg; _subLbl.ForeColor = _fgSub; }
-            if (_extBadge != null) { _extBadge.BackColor = _badgeBg; _extBadge.ForeColor = _badgeFg; }
+            _bg = _pal.Bg;
+            _bgHover = _pal.Hover;
+            _fg = _pal.Fg;
+            _fgSub = _pal.Sub;
+            _badgeBg = _pal.BadgeBg;
+            _badgeFg = _pal.BadgeFg;
+            _typeColor = _pal.StripColor;
+            if (_nameFont != null) _nameFont.Dispose();
+            if (_subFont != null) _subFont.Dispose();
+            if (_badgeFont != null) _badgeFont.Dispose();
+            _nameFont = new Font(_pal.FontName, _pal.FontSize);
+            _subFont = new Font(_pal.FontName, _pal.FontSize - 1f);
+            _badgeFont = new Font(_pal.FontName, _pal.FontSize - 1f, FontStyle.Bold);
+            _fnRender();
         }
 
         private static Color _fnLighten(Color c, float k)
@@ -371,7 +285,7 @@ namespace HoverExplorer
             // 异常中断 Tick → 预览永不自动关闭。判定"不在卡片上"让轮询走正常关闭路径
             if (IsDisposed) return false;
             var p = PointToClient(Cursor.Position);
-            return p.X >= 0 && p.X < ClientSize.Width && p.Y >= 0 && p.Y < ClientSize.Height;
+            return p.X >= 0 && p.X < ClientSize.Width - ShadowPad && p.Y >= 0 && p.Y < ClientSize.Height - ShadowPad;
         }
 
         private bool _fnPreviewContainsCursor()
@@ -384,23 +298,20 @@ namespace HoverExplorer
         {
             if (_hover == on) return;
             _hover = on;
-            Color bg = on ? _bgHover : _bg;
-            BackColor = bg;
-            foreach (Control c in Controls) if (c.BackColor == _bg || c.BackColor == _bgHover) c.BackColor = bg;
-            // sub 放徽章右侧到卡片右缘的剩余空间（按钮组已在徽章左侧），放不下就不显示
+            // sub 放徽章右侧到卡片右缘的剩余空间，放不下就不显示
             if (on)
             {
-                int left = _extBadge.Right + 5;
-                int right = Width - 6;
+                int left = _badgeRect.Right + 5;
+                int right = Width - ShadowPad - 6;
                 if (right - left >= 24)
                 {
-                    _subLbl.Location = new Point(left, 8);
-                    _subLbl.Size = new Size(right - left, 13);
-                    _subLbl.Visible = true;
+                    _subRect = new Rectangle(left, 5, right - left, 13);
+                    _subVisible = true;
                 }
-                else _subLbl.Visible = false;
+                else _subVisible = false;
             }
-            else _subLbl.Visible = false;
+            else _subVisible = false;
+            _fnRender();
 
             if (_isText)
             {
@@ -661,9 +572,7 @@ namespace HoverExplorer
         {
             _name = !string.IsNullOrEmpty(_item.Title) ? _item.Title : Ingest.Ellipsis(Ingest.FirstLine(_item.Path), 18);
             _sub = _item.Path.Length + " 字";
-            _nameLbl.Text = _name;
-            _subLbl.Text = _sub;
-            Invalidate();
+            _fnRender();
         }
 
         // 粘贴：卡片 MA_NOACTIVATE 不抢焦点，SetClipboard 后模拟 Ctrl+V 贴回原焦点窗口
@@ -694,12 +603,23 @@ namespace HoverExplorer
 
         protected override bool ShowWithoutActivation { get { return true; } }
 
-        // 高度锁死 28px：AutoScale 在句柄创建/布局阶段会改写 bounds（实测 28→39），
-        // 在 SetBoundsCore 统一钳制。不能用 MaximumSize=(0,28)：0 宽分量被当真实上限，
+        // 分层窗口：WS_EX_LAYERED + UpdateLayeredWindow 实现逐像素 Alpha 透明
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000;   // WS_EX_LAYERED
+                return cp;
+            }
+        }
+
+        // 高度锁死 24px：AutoScale 在句柄创建/布局阶段会改写 bounds（实测 28→39），
+        // 在 SetBoundsCore 统一钳制。不能用 MaximumSize=(0,24)：0 宽分量被当真实上限，
         // 宽度全被压到 MinimumSize.Width → 所有卡片同宽、徽章截断（实测踩坑）
         protected override void SetBoundsCore(int x, int y, int width, int height, BoundsSpecified specified)
         {
-            height = 28;
+            height = 24 + ShadowPad;
             base.SetBoundsCore(x, y, width, height, specified);
         }
 
@@ -707,6 +627,18 @@ namespace HoverExplorer
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x21) { m.Result = (IntPtr)3; return; }
+            if (m.Msg == 0x84)   // WM_NCHITTEST：阴影区域点击穿透
+            {
+                base.WndProc(ref m);
+                if ((int)m.Result == 1)
+                {
+                    long lp = m.LParam.ToInt64();
+                    var pt = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                    if (pt.X >= Width - ShadowPad || pt.Y >= Height - ShadowPad)
+                        m.Result = (IntPtr)(-1);   // HTTRANSPARENT
+                }
+                return;
+            }
             base.WndProc(ref m);
         }
 
@@ -716,37 +648,159 @@ namespace HoverExplorer
             // 卡片配色独立于面板主题：DWM 暗色模式按卡片底色明暗决定。
             // 圆角模式也强制卡片直角：DWM 裁角与卡片自有硬描边/全高色条冲突（残角/碎边）
             Win11.Apply(Handle, CardPalette.Lum(_bg) < 128, Config.Border);
-            Win11.ForceSquareCorners(Handle);
+            Win11.RemoveDropShadow(Handle);     // 分层窗口自绘阴影，不用系统 CS_DROPSHADOW 直角阴影
+            Win11.ForceSquareCorners(Handle);   // DWM 直角不裁剪窗口，自绘圆角+阴影完整可见
+            Win11.RemoveNcBorder(Handle);       // 禁用 DWM 非客户区渲染+边框，去掉白色描边
+
+            _fnRender();   // 句柄就绪后首次渲染
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        // 圆角矩形路径（AntiAlias 平滑）
+        private static GraphicsPath _fnRoundRect(int x, int y, int w, int h, int r)
         {
-            base.OnPaint(e);
-            var g = e.Graphics;
+            var path = new GraphicsPath();
+            if (r <= 0) { path.AddRectangle(new Rectangle(x, y, w, h)); return path; }
+            r = Math.Min(r, Math.Min(w, h) / 2);
+            int d = r * 2;
+            path.AddArc(x, y, d, d, 180, 90);
+            path.AddArc(x + w - d, y, d, d, 270, 90);
+            path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            path.AddArc(x, y + h - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        // 全自绘渲染：画到 Format32bppArgb 位图 → UpdateLayeredWindow（逐像素 Alpha 透明）
+        private void _fnRender()
+        {
+            if (IsDisposed || !IsHandleCreated || Width <= 0 || Height <= 0) return;
             int w = Width, h = Height;
-            // 配色里的硬阴影（HTML 的 2px 2px 0）：画在卡片内缘右下，不改窗口尺寸
-            if (_pal != null && _pal.Shadow.A > 0)
+            int cw = w - ShadowPad, ch = h - ShadowPad;
+            int radius = _pal != null ? _pal.Radius : 0;
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+            using (var g = Graphics.FromImage(bmp))
             {
-                using (var b = new SolidBrush(_pal.Shadow))
+                // ClearTypeGridFit：文字按子像素与卡片底色混合，笔画锐利（灰阶 AA 在
+                // 分层窗口浅色文字上发虚呈锯齿感）；文字始终落在已填充的卡片底色上，
+                // 不会在透明区产生彩色边缘
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+                // 圆角抗锯齿。此前关掉是因为旧推送链路(GetHbitmap)会把半透明边缘像素
+                // 合成出白边，只能牺牲平滑换干净；改 CreateDIBSection 预乘直推后
+                // 边缘像素按 alpha 正确合成，白边不复存在，可以放心开 AA
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                // 自绘阴影（右下偏移，跟着圆角走）
+                for (int i = ShadowPad; i > 0; i--)
                 {
-                    g.FillRectangle(b, w - 2, 0, 2, h);
-                    g.FillRectangle(b, 0, h - 2, w, 2);
+                    using (var sp = _fnRoundRect(i, i, cw, ch, radius))
+                    using (var sb = new SolidBrush(Color.FromArgb(30, 0, 0, 0)))
+                        g.FillPath(sb, sp);
                 }
+
+                // 背景（圆角 + Alpha 透明）
+                Color bg = _dropHighlight ? Config.DropHighlight : (_hover ? _bgHover : _bg);
+                if (bg.A > 0)
+                    using (var path = _fnRoundRect(0, 0, cw, ch, radius))
+                    using (var b = new SolidBrush(bg))
+                        g.FillPath(b, path);
+
+                // 左侧色条（裁剪到卡片圆角形状内）
+                if (_pal != null && _pal.StripWidth > 0 && _pal.StripColor.A > 0)
+                {
+                    using (var clip = _fnRoundRect(0, 0, cw, ch, radius))
+                    {
+                        g.SetClip(clip);
+                        using (var b = new SolidBrush(_pal.StripColor))
+                            g.FillRectangle(b, 0, 0, _pal.StripWidth, ch);
+                        g.ResetClip();
+                    }
+                }
+
+                // 徽标背景（圆角，悬停时提亮一档）
+                Color badgeBg = _badgeHover ? _fnLighten(_badgeBg, 0.15f) : _badgeBg;
+                if (badgeBg.A > 0)
+                    using (var path = _fnRoundRect(_badgeRect.X, _badgeRect.Y, _badgeRect.Width, _badgeRect.Height, radius))
+                    using (var b = new SolidBrush(badgeBg))
+                        g.FillPath(b, path);
+
+                // 徽标文字
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.None })
+                using (var br = new SolidBrush(_badgeFg))
+                    g.DrawString(_ext, _badgeFont, br, _badgeRect, sf);
+
+                // 名字
+                using (var sf = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                using (var br = new SolidBrush(_fg))
+                    g.DrawString(_name, _nameFont, br, _nameRect, sf);
+
+                // 副标题（仅悬停时显示）
+                if (_subVisible)
+                    using (var sf = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                    using (var br = new SolidBrush(_fgSub))
+                        g.DrawString(_sub, _subFont, br, _subRect, sf);
+
+                // 今天修改过：名字左侧状态点
+                if (_isToday)
+                    using (var b = new SolidBrush(Color.FromArgb(0x2f, 0xb3, 0x6b)))
+                        g.FillEllipse(b, 10, 10, 5, 5);
+
+                // 预乘 alpha：UpdateLayeredWindow 的 AC_SRC_ALPHA 期望预乘 alpha
+                byte[] px;
+                {
+                    var bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+                    px = new byte[bd.Stride * h];
+                    Marshal.Copy(bd.Scan0, px, 0, px.Length);
+                    for (int i = 0; i < px.Length; i += 4)
+                    {
+                        byte a = px[i + 3];
+                        if (a < 255)
+                        {
+                            px[i] = (byte)(px[i] * a / 255);
+                            px[i + 1] = (byte)(px[i + 1] * a / 255);
+                            px[i + 2] = (byte)(px[i + 2] * a / 255);
+                        }
+                    }
+                    Marshal.Copy(px, 0, bd.Scan0, px.Length);
+                    bmp.UnlockBits(bd);
+                }
+
+                // 推送到分层窗口：CreateDIBSection 直写预乘字节。
+                // 不能用 Bitmap.GetHbitmap()：它产出的 GDI 位图会把低 alpha 像素的 RGB
+                // 拍平成不透明浅灰（实测 A=0→RGB211、A=56→RGB165），ULW 合成后阴影带/
+                // 圆角镂空全变白边（在浅色壁纸上溢出为纯白）；DIB 按字节原样携带 alpha
+                IntPtr hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
+                try
+                {
+                    var bmi = new NativeMethods.BITMAPINFO();
+                    bmi.bmiHeader.biSize = Marshal.SizeOf(typeof(NativeMethods.BITMAPINFOHEADER));
+                    bmi.bmiHeader.biWidth = w;
+                    bmi.bmiHeader.biHeight = -h;   // 负高 = 自上而下行序，与 LockBits 布局一致
+                    bmi.bmiHeader.biPlanes = 1;
+                    bmi.bmiHeader.biBitCount = 32;
+                    bmi.bmiHeader.biCompression = 0;   // BI_RGB
+                    IntPtr bits;
+                    IntPtr dib = NativeMethods.CreateDIBSection(hdcScreen, ref bmi, 0, out bits, IntPtr.Zero, 0);
+                    Marshal.Copy(px, 0, bits, px.Length);
+                    IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
+                    IntPtr hOld = NativeMethods.SelectObject(hdcMem, dib);
+                    var ptDst = new NativeMethods.POINT { X = Left, Y = Top };
+                    var ptSrc = new NativeMethods.POINT { X = 0, Y = 0 };
+                    var sz = new Size(w, h);
+                    var blend = new NativeMethods.BLENDFUNCTION
+                    {
+                        BlendOp = NativeMethods.AC_SRC_OVER,
+                        BlendFlags = 0,
+                        SourceConstantAlpha = 255,
+                        AlphaFormat = NativeMethods.AC_SRC_ALPHA
+                    };
+                    NativeMethods.UpdateLayeredWindow(Handle, hdcScreen, ref ptDst, ref sz, hdcMem, ref ptSrc, 0, ref blend, NativeMethods.ULW_ALPHA);
+                    NativeMethods.SelectObject(hdcMem, hOld);
+                    NativeMethods.DeleteObject(dib);
+                    NativeMethods.DeleteDC(hdcMem);
+                }
+                finally { NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen); }
             }
-            // 硬描边（糖果硬边 / 高对比黑白黄等配色）
-            if (_pal != null && _pal.BorderWidth > 0 && _pal.Border.A > 0)
-            {
-                int bw = _pal.BorderWidth;
-                using (var p = new Pen(_pal.Border, bw))
-                    g.DrawRectangle(p, bw / 2, bw / 2, w - bw, h - bw);
-            }
-            // 左 6px 类型色条（标签带头）
-            using (var b = new SolidBrush(_typeColor))
-                g.FillRectangle(b, 0, 0, 6, h);
-            // 今天修改过：名字左侧状态点
-            if (_isToday)
-                using (var b = new SolidBrush(Color.FromArgb(0x2f, 0xb3, 0x6b)))
-                    g.FillEllipse(b, 10, 12, 5, 5);
         }
 
         private static string _fnCountSub(string dir)
@@ -759,12 +813,7 @@ namespace HoverExplorer
             catch { return ""; }
         }
 
-        // 卡片类型 → 指定配色的类型色（folder 黄/image 绿/doc 蓝/script 橙/link 紫/pdf 红/text 青/lnk 粉/code 灰）
-        private static Color _fnTypeColor(PinnedItem item, CardPalette pal)
-        {
-            if (pal == null) return Color.FromArgb(0x64, 0x74, 0x8b);
-            return pal.TypeOf(CardPalette.TypeKeyOf(item));
-        }
+        // _fnTypeColor 已移除（类型色机制取消，色条/徽章统一用配色字段）
 
         private void Run()
         {
@@ -781,19 +830,32 @@ namespace HoverExplorer
             catch (Exception ex) { Program.DebugLog("[pincard] run fail " + _item.Kind + " " + _item.Path + " " + ex.Message); }
         }
 
-        // 对一个控件启用文件拖放（复制/移动进 _item 文件夹）
+        // 对一个控件启用文件拖放（复制/移动进 _item 文件夹）+ 徽标悬停弹簧展开
         private void _fnEnableDrop(Control c)
         {
             c.AllowDrop = true;
-            c.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; BackColor = Config.DropHighlight; } };
-            c.DragOver += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy; };
-            c.DragLeave += (s, e) => { BackColor = _bg; };
-            c.DragDrop += (s, e) => _fnHandleDrop(e);
+            c.DragEnter += (s, e) =>
+            {
+                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                _dropHighlight = true; _fnRender();
+                if (_isDir) _fnScheduleBadgeDragOpen();
+            };
+            c.DragOver += (s, e) =>
+            {
+                if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+                e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                var pt = c.PointToClient(new Point(e.X, e.Y));
+                if (_isDir && _badgeRect.Contains(pt)) _fnScheduleBadgeDragOpen();
+                else _fnCancelBadgeDragOpen();
+            };
+            c.DragLeave += (s, e) => { _dropHighlight = false; _fnRender(); _fnCancelBadgeDragOpen(); };
+            c.DragDrop += (s, e) => { _fnCancelBadgeDragOpen(); _fnHandleDrop(e); };
         }
 
         private void _fnHandleDrop(DragEventArgs e)
         {
-            BackColor = _bg;
+            _dropHighlight = false; _fnRender();
             var files = e.Data.GetData(DataFormats.FileDrop) as string[];
             if (files == null) return;
             bool move = e.Effect == DragDropEffects.Move;
@@ -852,9 +914,26 @@ namespace HoverExplorer
             {
                 m.Items.Add(I18n.T("copy_path"), null, (s, e) => { try { Clipboard.SetText(_item.Path); } catch { } });
             }
+            m.Items.Add(I18n.T("card_add_palette"), null, (s, e) => _fnAddPaletteFromClipboard());
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(I18n.T("unpin"), null, (s, e) => Program.Unpin(_item.Kind, _item.Path));
             m.Show(Cursor.Position);
+        }
+
+        // 右键菜单：保存剪贴板中的配色方案并应用到当前卡片
+        private void _fnAddPaletteFromClipboard()
+        {
+            string clip = null; try { clip = Clipboard.GetText(); } catch { }
+            if (string.IsNullOrEmpty(clip) || clip.IndexOf("bg=", StringComparison.OrdinalIgnoreCase) < 0)
+            { Program.ShowBalloon("HoverExplorer", I18n.T("paste_invalid")); return; }
+            var parsed = CardPalette.Parse(clip, null);
+            string baseName = I18n.T("imported_prefix") + " " + DateTime.Now.ToString("MM-dd HH:mm");
+            string nm = baseName; int dup = 2;
+            while (CardPalettes.All.Exists(p => p.Name == nm)) nm = baseName + " (" + (dup++) + ")";
+            parsed.Name = nm; parsed.Radius = Math.Max(0, Math.Min(12, parsed.Radius));
+            CardPalettes.All.Add(parsed);
+            CardPalettes.Save();
+            SetPalette(CardPalettes.All.Count - 1, true);
         }
     }
 

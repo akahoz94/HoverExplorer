@@ -92,8 +92,8 @@ namespace HoverExplorer
         public static bool PreviewAudioCollapsed = true;
         // 收藏·历史列表宽度：0=按内容自适应；>0=用户拖宽后记忆
         public static int EntryListW = 0;
-        // 窗口边角风格：0=直角（默认，锐利卡片风）1=圆角·粗描边（DWM 圆角 + 3px 自绘描边）
-        public static int WindowCorners = 0;
+        // 窗口边角风格：0=直角（锐利卡片风）1=圆角·粗描边（DWM 圆角 + 3px 自绘描边，默认）
+        public static int WindowCorners = 1;
         // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
         public static double PreviewMaxRatio = 0.8;
         // 固定为"仅图标/名称触发"（已移除该开关）
@@ -107,6 +107,8 @@ namespace HoverExplorer
         // 2026-10-22 暂停：排序对齐不可靠（ini 是退出快照、临时排序错位）、HintWindow 阴影残留
         // 未彻底解决，代码保留待后续处理。要启用：config.json 设 TcEnabled=true（排序声明用设置里的"TC 排序"）
         public static bool TcEnabled = false;
+        // perch (ClipPad) 文本块 [text](路径) 悬停检测。WebView2 UIAutomation TextPattern 取鼠标下文本
+        public static bool PerchEnabled = true;
         // TC 排序模式声明：-1=自动(从 TC ini 推断，运行中临时改排序会错位)；0=名称↑ 1=名称↓
         // 2=日期↑ 3=日期↓ 4=大小↑ 5=大小↓ 6=扩展名↑ 7=扩展名↓。ini 推测不准时由用户显式指定
         public static int TcSortMode = -1;
@@ -161,9 +163,10 @@ namespace HoverExplorer
         public static string SortMode = "name";
         public static bool SortDesc = false;
         public static string Language = "zh";
-        public static string Theme = "dark";
+        public static string Theme = "light";
         // 桌面卡片配色索引（独立于 Theme：面板主题不影响卡片；卡片上滚轮可循环切换）
         public static int CardPaletteIndex = 0;
+        public static string CardPalettesData = "";
         public static List<PinnedItem> PinnedItems = new List<PinnedItem>();
         public static readonly string FontName = "Microsoft YaHei UI";
         public static readonly float FontSize = 10f;
@@ -391,6 +394,7 @@ namespace HoverExplorer
                         case "TextPreviewLines": TextPreviewLines = Convert.ToInt32(v); break;
                         case "ExplorerEnabled": ExplorerEnabled = Convert.ToBoolean(v); break;
                         case "TcEnabled": TcEnabled = Convert.ToBoolean(v); break;
+                        case "PerchEnabled": PerchEnabled = Convert.ToBoolean(v); break;
                         case "TcSortMode": TcSortMode = Convert.ToInt32(v); break;
                         case "PreviewFiles": PreviewFiles = Convert.ToBoolean(v); break;
                         case "PreviewImage": PreviewImage = Convert.ToBoolean(v); break;
@@ -454,6 +458,7 @@ namespace HoverExplorer
                         case "AltSuppressHover": AltSuppressHover = Convert.ToBoolean(v); break;
                         case "ListPalette": ListPalette = Convert.ToString(v); break;
                         case "ListPalettesData": ListPalettesData = Convert.ToString(v); break;
+                        case "CardPalettesData": CardPalettesData = Convert.ToString(v); break;
                         case "SortMode": SortMode = Convert.ToString(v); break;
                         case "SortDesc": SortDesc = Convert.ToBoolean(v); break;
                     }
@@ -461,6 +466,7 @@ namespace HoverExplorer
                 I18n.Lang = Language;
                 RefreshSortLabels();
                 ApplyTheme();
+                CardPalettes.Load();
             }
             catch { }
         }
@@ -481,6 +487,7 @@ namespace HoverExplorer
                 }
                 data["ExplorerEnabled"] = ExplorerEnabled;
                 data["TcEnabled"] = TcEnabled;
+                data["PerchEnabled"] = PerchEnabled;
                 data["TcSortMode"] = TcSortMode;
                 data["PreviewFiles"] = PreviewFiles;
                 data["PreviewImage"] = PreviewImage;
@@ -527,6 +534,7 @@ namespace HoverExplorer
                 data["Language"] = Language;
                 data["Theme"] = Theme;
                 data["CardPaletteIndex"] = CardPaletteIndex;
+                data["CardPalettesData"] = CardPalettesData;
                 data["HoverDelay"] = HoverDelay;
                 data["CloseDelay"] = CloseDelay;
                 data["PreviewMinWidth"] = PreviewMinWidth;

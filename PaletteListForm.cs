@@ -160,13 +160,13 @@ namespace HoverExplorer
                 int tx = PadX, ty = top + (RowH - TapeH) / 2;
                 using (var b = new SolidBrush(p.Bg))
                     g.FillRectangle(b, tx, ty, TapeW, TapeH);
-                using (var b = new SolidBrush(p.Folder))
+                using (var b = new SolidBrush(p.StripColor))
                     g.FillRectangle(b, tx, ty, 4, TapeH);
-                using (var b = new SolidBrush(p.Folder))
+                using (var b = new SolidBrush(p.BadgeBg))
                     g.FillRectangle(b, tx + TapeW - 11, ty + 2, 9, TapeH - 4);
-                if (p.BorderWidth > 0 && p.Border.A > 0)
+                if (p.StripWidth > 0 && p.StripColor.A > 0)
                 {
-                    using (var pen = new Pen(p.Border, p.BorderWidth))
+                    using (var pen = new Pen(p.StripColor, p.StripWidth))
                         g.DrawRectangle(pen, tx, ty, TapeW, TapeH);
                 }
                 else

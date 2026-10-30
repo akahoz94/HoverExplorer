@@ -1198,18 +1198,12 @@ internal static class MediaPreview
             if (!_down || _winMoved) return;
             int dx = e.X - _downPt.X;
             int dy = e.Y - _downPt.Y;
-            // 竖向位移先超阈值 → 拖动移动窗口（横向是 scrub 语义，不能用来移窗）
-            if (Math.Abs(dy) > 4 && Math.Abs(dy) > Math.Abs(dx))
+            // 任意方向超阈值 → 拖动移动窗口（不 scrub）
+            if (Math.Abs(dx) > 3 || Math.Abs(dy) > 3)
             {
                 _winMoved = true;
                 var m = MoveWindow;
                 if (m != null) m();
-                return;
-            }
-            if (Math.Abs(dx) > 3)
-            {
-                _scrubbed = true;
-                SeekAt(e.X);
             }
         }
 

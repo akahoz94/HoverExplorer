@@ -50,9 +50,11 @@ namespace HoverExplorer
                 int v = Math.Max(0, Math.Min(value, Math.Max(0, _max - _large)));
                 if (v == _value) return;
                 _value = v; Invalidate();
-                if (Scroll != null) Scroll(this, EventArgs.Empty);
+                if (!_suppressScroll && Scroll != null) Scroll(this, EventArgs.Empty);
             }
         }
+        internal bool _suppressScroll;
+        internal bool IsDragging { get { return _drag; } }
 
         void Sync() { Visible = _max > _large; Invalidate(); }
 

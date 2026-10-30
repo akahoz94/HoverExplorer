@@ -11,10 +11,20 @@ using System.Windows.Forms;
 
 namespace HoverExplorer
 {
+    // 抗锯齿 Label：双缓冲位图上 DrawString 默认不抗锯齿，需显式设 TextRenderingHint
+    internal class SmoothLabel : Label
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            base.OnPaint(e);
+        }
+    }
+
     // 按钮/图标提示窗口：无边框、不抢前台、不在任务栏，位置固定在鼠标指针上方
     internal class TipForm : Form
     {
-        private Label _lbl;
+        private SmoothLabel _lbl;
 
         public TipForm()
         {
@@ -23,7 +33,7 @@ namespace HoverExplorer
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
             BackColor = Config.BG;
-            _lbl = new Label
+            _lbl = new SmoothLabel
             {
                 AutoSize = false,
                 ForeColor = Config.FG,
@@ -82,6 +92,7 @@ namespace HoverExplorer
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             // 提示文字一律 1px 细边：圆角模式的非客户区粗描边（FramePad 还会内缩裁掉文字）
             // 对小尺寸提示窗太重，不需要跟随 WindowCorners
             using (var pen = new Pen(Config.Border)) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
@@ -189,6 +200,11 @@ namespace HoverExplorer
             NativeMethods.SetWindowPos(_form.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
                 NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
         }
+    }
+
+    // 文件夹音频列表：原生 ListBox，使用原生垂直滚动条（不再隐藏/替换为自定义 SlimScrollBar）
+    internal class FolderListBox : ListBox
+    {
     }
 
     // 自管偏移滚动：viewport（本体，固定可视区）+ content（内容层，容纳全部行，Y=-offset 偏移）。
@@ -324,9 +340,11 @@ namespace HoverExplorer
         // 图标位画序号（左对齐 20px 槽；淡色=ListMu 与大小文字同层级）
         private void DrawIndex(Graphics g, int x)
         {
-            var r = new Rectangle(x, 0, 20, Height);
-            TextRenderer.DrawText(g, (RowIndex + 1).ToString(), IndexFont(), r, Config.ListMu,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            // GDI+ DrawString（与名称/大小同一渲染路径）：TextRenderer(GDI) 小字号下笔画粗粝显锯齿
+            var f = IndexFont();
+            float ly = (Height - f.GetHeight(g)) / 2;
+            using (var b = new SolidBrush(Config.ListMu))
+                g.DrawString((RowIndex + 1).ToString(), f, b, new RectangleF(x, ly, 20, f.GetHeight(g)), StringFormat.GenericTypographic);
         }
 
         // 名称单行中间省略："前半…后半"（Finder 风格，左 60% 右 40%），二分找最大保留字符数
@@ -363,6 +381,7 @@ namespace HoverExplorer
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             // 互换布局=分栏：竖分隔线贯穿行，左栏画大小/子项数，右栏图标贴线、名称单行中间省略
             if (Config.RowSwapSides)
             {
@@ -383,10 +402,11 @@ namespace HoverExplorer
                 }
                 if (!string.IsNullOrEmpty(SizeText))
                 {
-                    // TextRenderer 垂直居中：与图标/序号的几何中心对齐（GDI+ DrawString 行距含内部留白会偏低）
-                    var rcS = new Rectangle(PadEdge, 0, Math.Max(0, SplitX - 2 - PadEdge), Height);
-                    TextRenderer.DrawText(g, SizeText, Font, rcS, Config.ListMu,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    // GDI+ 绘制（与名称同路径同垂直居中公式），TextRenderer(GDI) 笔画粗粝显锯齿
+                    float lhS = Font.GetHeight(g);
+                    var rcS = new RectangleF(PadEdge, (Height - lhS) / 2, Math.Max(0, SplitX - 2 - PadEdge), lhS);
+                    using (var b = new SolidBrush(Config.ListMu))
+                        g.DrawString(SizeText, Font, b, rcS, StringFormat.GenericTypographic);
                 }
                 if (!string.IsNullOrEmpty(Name))
                 {
@@ -401,9 +421,11 @@ namespace HoverExplorer
                     float maxW = Width - 6 - textX;
                     if (maxW > 8)
                     {
-                        var rc = new Rectangle((int)textX, 0, (int)maxW, Height);
-                        TextRenderer.DrawText(g, MidEllipsis(g, Name, Font, maxW), Font, rc, ForeColor,
-                            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                        var sf = StringFormat.GenericTypographic;
+                        float lh = Font.GetHeight(g);
+                        using (var b = new SolidBrush(ForeColor))
+                            g.DrawString(MidEllipsis(g, Name, Font, maxW), Font, b, textX, (Height - lh) / 2, sf);
                     }
                 }
                 return;
@@ -421,10 +443,11 @@ namespace HoverExplorer
             }
             if (!string.IsNullOrEmpty(SizeText))
             {
-                // TextRenderer 垂直居中：与图标/序号/名称的几何中心对齐
-                var rcS = new Rectangle(0, 0, Width - PadEdge, Height);
-                TextRenderer.DrawText(e.Graphics, SizeText, Font, rcS, Config.ListMu,
-                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                // GDI+ 右对齐：与名称同一渲染路径/垂直居中公式（TextRenderer(GDI) 笔画粗粝显锯齿）
+                float lhS = Font.GetHeight(e.Graphics);
+                float wS = e.Graphics.MeasureString(SizeText, Font, PointF.Empty, StringFormat.GenericTypographic).Width;
+                using (var b = new SolidBrush(Config.ListMu))
+                    e.Graphics.DrawString(SizeText, Font, b, Width - PadEdge - wS, (Height - lhS) / 2, StringFormat.GenericTypographic);
             }
             // 名称单行显示、过长时中间省略（Label 文本会换行，故走自绘）
             if (!string.IsNullOrEmpty(Name))
@@ -433,9 +456,11 @@ namespace HoverExplorer
                 float maxW = Width - Padding.Left - Padding.Right; // 右侧留大小文本列
                 if (maxW > 8)
                 {
-                    var rc = new Rectangle((int)textX, 0, (int)maxW, Height);
-                    TextRenderer.DrawText(e.Graphics, MidEllipsis(e.Graphics, Name, Font, maxW), Font, rc, ForeColor,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+                    e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    var sf = StringFormat.GenericTypographic;
+                    float lh = Font.GetHeight(e.Graphics);
+                    using (var b = new SolidBrush(ForeColor))
+                        e.Graphics.DrawString(MidEllipsis(e.Graphics, Name, Font, maxW), Font, b, textX, (Height - lh) / 2, sf);
                 }
             }
         }
@@ -601,6 +626,25 @@ namespace HoverExplorer
 
         private bool _textDirty;
 
+        // ===== 文件夹播放模式（音频）：滚轮进入，滚动切歌；☰ 按钮展开音频列表+循环模式 =====
+        private bool _folderMode;                  // 进入后持续到关窗；滚动=切歌
+        private List<string> _folderTracks;        // 同目录音频文件，名称自然排序（默认排序）
+        private string _folderDir;
+        private int _folderIdx;
+        private int _loopMode;                     // 0=顺序(播完即止) 1=列表循环 2=单曲循环
+        private Label _folderBtn;
+        private Panel _folderPanel;
+        private Panel _folderHead;
+        private FolderListBox _folderList;
+        private Label _loopBtn;
+        private Label _folderHeadLbl;
+        private bool _folderListOn;
+
+        private TipForm _folderTip;
+        private Timer _folderTipTimer;
+        private const int FolderRowH = 22;
+        private const int FolderMaxRows = 8;
+
         private Timer _unpinCloseTimer;
         private Timer _gripTimer;
         private Timer _sizeSaveTimer;
@@ -734,6 +778,7 @@ namespace HoverExplorer
             _nameLbl.Visible = false;   // 标题移到展开信息区
             _pinBtn.BackColor = Color.Transparent;
             _toolbar.ShowProgress = false;   // 进度由波形呈现
+            _scrollPanel.AutoScroll = false;   // 音频窗：Dock=Fill 子控件高度由 UpdateAudioHeight 精确管理，关 AutoScroll 避免 Visible 切换时滚动条显隐抖动
 
             _audioPlayBtn = new Label
             {
@@ -810,6 +855,7 @@ namespace HoverExplorer
             };
             _toolbar.Controls.Add(_audioViz);
 
+
             // 展开信息区（悬停操作栏 300ms 展开）：文件名 / 时间进度 / 格式·大小
             _audioBody = new Panel { BackColor = Config.BG };
             _audioNameLbl = new Label
@@ -844,8 +890,9 @@ namespace HoverExplorer
             _audioBody.Controls.Add(_audioTimeLbl);
             _audioBody.Controls.Add(_audioMetaLbl);
             _scrollPanel.Controls.Add(_audioBody);
-            _audioBody.Dock = DockStyle.Fill;
-            _audioBody.Height = AudioInfoH;
+            _audioBody.Dock = DockStyle.None;
+            _audioBody.Location = new Point(0, 0);
+            _audioBody.Height = 0;
             BindResize(_audioBody);
 
             // 悬停展开：鼠标停在操作栏任意位置（播放键/波形/固定键）300ms → 展开信息区
@@ -896,6 +943,7 @@ namespace HoverExplorer
                 _audio.Opened += delegate { UpdateAudioUi(); };
                 _audio.EstimateReady += delegate { UpdateAudioUi(); };
                 _audio.Ended += delegate { UpdateAudioUi(); };
+                _audio.Ended += delegate { OnFolderTrackEnded(); };   // 文件夹播放模式：按循环模式自动切下一首
                 _audio.Failed += delegate
                 {
                     if (_audioTimeLbl != null) _audioTimeLbl.Text = "解码失败";
@@ -917,9 +965,300 @@ namespace HoverExplorer
         {
             if (_audioExpanded == on) return;
             _audioExpanded = on;
-            ClientSize = new Size(ClientSize.Width, _toolbarH + (on ? AudioInfoH : 0));
-            ApplyLayout();
+            UpdateAudioHeight();
         }
+
+        // 高度统一管理：文件夹播放模式下信息区始终可见 + head 常驻 + 列表展开/折叠
+        private void UpdateAudioHeight()
+        {
+            int infoH;
+            int listH = 0;
+            if (_folderMode)
+            {
+                infoH = _audioExpanded ? AudioInfoH : 0;   // 信息区可折叠（点击折叠/悬停展开）
+                listH = FolderListH();   // head(24) + 可选列表行
+            }
+            else
+            {
+                infoH = _audioExpanded ? AudioInfoH : 0;
+            }
+            int body = infoH + listH;
+            // 只改窗口高度，不动宽度：ClientSize setter 会触发 WM_NCCALCSIZE 内缩 FramePad，
+            // 每次读 ClientSize.Width（已被 WM_SIZE 更新为客户区宽）再写回会让窗口宽度递减 2*FramePad。
+            // 用 Height（窗口高度）避开 ClientSize.Width 读写循环。
+            Height = _toolbarH + body + 2 * Win11.FramePad;
+            ApplyLayout();
+            // 手动定位信息区与列表区（避免 AutoScroll+Dock 交互导致 _folderPanel 空白）
+            int w = ClientSize.Width;
+            if (_audioBody != null)
+            {
+                _audioBody.Location = new Point(0, 0);
+                _audioBody.Size = new Size(w, infoH);
+            }
+            if (_folderPanel != null && _folderMode)
+            {
+                _folderPanel.Location = new Point(0, infoH);
+                _folderPanel.Size = new Size(w, listH);
+                _folderPanel.Visible = true;
+            }
+        }
+
+        // ===== 文件夹播放模式 =====
+
+        // 构建/刷新同目录音频清单（按名称自然排序=默认排序）；目录变了才重扫
+        private bool EnsureFolderTracks()
+        {
+            if (string.IsNullOrEmpty(FilePath)) return false;
+            string dir;
+            try { dir = Path.GetDirectoryName(FilePath); } catch { return false; }
+            if (string.IsNullOrEmpty(dir)) return false;
+            if (_folderTracks != null && string.Equals(dir, _folderDir, StringComparison.OrdinalIgnoreCase))
+                return _folderTracks.Count > 0;
+            _folderDir = dir;
+            _folderTracks = new List<string>();
+            try
+            {
+                foreach (var f in Directory.GetFiles(dir))
+                    if (Config.AudioExts.Contains(Path.GetExtension(f))) _folderTracks.Add(f);
+            }
+            catch { }
+            _folderTracks.Sort(NativeMethods.StrCmpLogicalW);
+            _folderIdx = _folderTracks.FindIndex(t => string.Equals(t, FilePath, StringComparison.OrdinalIgnoreCase));
+            if (_folderIdx < 0) _folderIdx = 0;
+            return _folderTracks.Count > 0;
+        }
+
+        // 滚轮驱动：第一次滚动只进入文件夹播放模式并提示；之后向下=下一首、向上=上一首
+        internal void AudioWheel(int delta)
+        {
+            if (_audio == null) return;
+            if (!EnsureFolderTracks()) return;
+            if (!_folderMode)
+            {
+                _folderMode = true;
+                BuildFolderPanel();
+                _audioExpanded = true;   // 进入文件夹模式：信息区默认显示（点击可折叠）
+
+                SetFolderListVisible(false);   // 列表初始折叠，仅显示 head（含 ☰ 与循环模式）
+                ShowFolderTip(I18n.T("folder_play_enter"));
+                return;
+            }
+            int n = _folderTracks.Count;
+            PlayFolderTrack((_folderIdx + (delta < 0 ? 1 : -1) + n) % n);
+        }
+
+        // 切歌：会话 Reload 原路复用（MCI/MediaSession 各自重开），波形按新路径自动重解码
+        private void PlayFolderTrack(int idx)
+        {
+            if (_folderTracks == null || idx < 0 || idx >= _folderTracks.Count) return;
+            _folderIdx = idx;
+            string path = _folderTracks[idx];
+            FilePath = path;
+            string meta;
+            try
+            {
+                var fi = new FileInfo(path);
+                meta = Path.GetExtension(path).TrimStart('.').ToUpper() + " · "
+                    + (fi.Length >= 1048576 ? (fi.Length / 1048576.0).ToString("0.#") + " MB" : (fi.Length / 1024.0).ToString("0.#") + " KB");
+            }
+            catch { meta = ""; }
+            SetHeader(Path.GetFileName(path), meta, "♪", Config.BG);
+            try
+            {
+                _audio.Reload(path);
+                _audio.Play();
+            }
+            catch { }
+            if (OnFileSwitched != null) { try { OnFileSwitched(path); } catch { } }
+            SyncFolderListSel();
+            UpdateAudioUi();
+        }
+
+        // 播完一首：单曲循环原地重播；列表循环到底回首；顺序播完即止
+        private void OnFolderTrackEnded()
+        {
+            if (!_folderMode || _folderTracks == null || _folderTracks.Count == 0 || _audio == null) return;
+            if (_loopMode == 2)
+            {
+                try { _audio.SeekRatio(0); _audio.Play(); } catch { }
+                return;
+            }
+            int next = _folderIdx + 1;
+            if (next >= _folderTracks.Count)
+            {
+                if (_loopMode != 1) return;
+                next = 0;
+            }
+            PlayFolderTrack(next);
+        }
+
+        private string LoopIcon() { return _loopMode == 1 ? "↻" : _loopMode == 2 ? "↻1" : "→"; }
+        private string LoopTip() { return I18n.T(_loopMode == 1 ? "loop_all" : _loopMode == 2 ? "loop_one" : "loop_seq"); }
+
+        // ☰ 按钮：手动点击展开/折叠文件夹列表
+        private void ToggleFolderList()
+        {
+            if (_folderListOn) { SetFolderListVisible(false); return; }
+            if (!EnsureFolderTracks()) return;
+            SetFolderListVisible(true);
+        }
+
+        private void BuildFolderPanel()
+        {
+            if (_folderPanel != null) { RefreshFolderItems(); return; }
+            _folderPanel = new Panel { BackColor = Config.BG, Dock = DockStyle.None, Visible = false };
+            _folderHead = new Panel { Dock = DockStyle.Top, Height = 24, BackColor = Config.BG };
+            var head = _folderHead;
+            _folderHeadLbl = new Label
+            {
+                Dock = DockStyle.Fill,
+                ForeColor = Config.FgDir,
+                BackColor = Config.BG,
+                Font = new Font(Config.FontName, 8f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(10, 0, 0, 0),
+                AutoEllipsis = true
+            };
+            _loopBtn = new Label
+            {
+                Size = new Size(34, 18),
+                Dock = DockStyle.Right,
+                Text = LoopIcon(),
+                ForeColor = Config.FG,
+                BackColor = Config.BG,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand,
+                Font = new Font(Config.FontName, 9f)
+            };
+            _loopBtn.Click += delegate
+            {
+                _loopMode = (_loopMode + 1) % 3;
+                _loopBtn.Text = LoopIcon();
+                Tips.Set(_loopBtn, LoopTip());
+            };
+            Tips.Set(_loopBtn, LoopTip());
+            // ☰ 列表按钮：插入到循环模式按钮位置（最右），循环模式按钮左移；手动点击展开/折叠
+            _folderBtn = new Label
+            {
+                Size = new Size(24, 18),
+                Dock = DockStyle.Right,
+                Text = "☰",
+                ForeColor = Config.FG,
+                BackColor = Config.BG,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand,
+                Font = new Font("Microsoft YaHei", 9f)
+            };
+            Tips.Set(_folderBtn, I18n.T("tip_folder_list"));
+            _folderBtn.Click += delegate { ToggleFolderList(); };
+            _folderList = new FolderListBox
+            {
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                BackColor = Config.BG,
+                ForeColor = Config.FG,
+                Font = new Font(Config.FontName, Config.FontSize),
+                DrawMode = DrawMode.OwnerDrawFixed,
+                ItemHeight = FolderRowH,
+                IntegralHeight = false
+            };
+            _folderList.DrawItem += FolderDrawItem;
+            _folderList.Click += delegate
+            {
+                if (_folderList.SelectedIndex >= 0) PlayFolderTrack(_folderList.SelectedIndex);
+            };
+            head.Controls.Add(_folderHeadLbl);   // Fill 先加
+            head.Controls.Add(_loopBtn);         // Right：先加→靠左
+            head.Controls.Add(_folderBtn);       // Right：后加→最右
+            _folderPanel.Controls.Add(_folderList);   // Fill 先加
+            _folderPanel.Controls.Add(head);          // Top 后加
+            _scrollPanel.Controls.Add(_folderPanel);
+            foreach (var c in new Control[] { _folderHead, _folderHeadLbl, _loopBtn, _folderBtn })
+            {
+                c.MouseDown += AudioBarDown;
+                c.MouseMove += AudioBarMove;
+                c.MouseUp += AudioBarUp;
+            }
+            RefreshFolderItems();
+        }
+
+        private void RefreshFolderItems()
+        {
+            _folderList.BeginUpdate();
+            _folderList.Items.Clear();
+            foreach (var t in _folderTracks) _folderList.Items.Add(Path.GetFileName(t));
+            _folderList.EndUpdate();
+
+            string dirName = "";
+            try { dirName = Path.GetFileName(_folderDir); } catch { }
+            _folderHeadLbl.Text = (string.IsNullOrEmpty(dirName) ? _folderDir : dirName) + "  (" + _folderTracks.Count + ")";
+            SyncFolderListSel();
+        }
+
+        private void SyncFolderListSel()
+        {
+            if (_folderList != null && _folderList.Items.Count == _folderTracks.Count
+                && _folderIdx >= 0 && _folderList.SelectedIndex != _folderIdx)
+                _folderList.SelectedIndex = _folderIdx;
+        }
+
+        private void FolderDrawItem(object s, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || _folderTracks == null || e.Index >= _folderTracks.Count) return;
+            bool cur = e.Index == _folderIdx;
+            bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            using (var b = new SolidBrush(sel ? Config.BgHover : Config.BG))
+                e.Graphics.FillRectangle(b, e.Bounds);
+            string name = (cur ? "♪ " : "") + (string)_folderList.Items[e.Index];
+            var rc = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, e.Bounds.Width - 16, e.Bounds.Height);
+            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            var sf = StringFormat.GenericTypographic;
+            float lh = _folderList.Font.GetHeight(e.Graphics);
+            using (var b = new SolidBrush(Config.FG))
+                e.Graphics.DrawString(RowLabel.MidEllipsis(e.Graphics, name, _folderList.Font, rc.Width), _folderList.Font, b, rc.X, e.Bounds.Y + (e.Bounds.Height - lh) / 2, sf);
+        }
+
+        private int FolderListH()
+        {
+            int headH = 24;
+            if (!_folderListOn) return headH;
+            int rows = Math.Min(Math.Max(_folderTracks != null && _folderTracks.Count > 0 ? _folderTracks.Count : 1, 1), FolderMaxRows);
+            return headH + rows * FolderRowH;
+        }
+
+        private void SetFolderListVisible(bool on)
+        {
+            _folderListOn = on;
+            if (_folderList != null) _folderList.Visible = on;
+            UpdateAudioHeight();
+            // 打开列表：滚到当前曲目（展开即视为进入文件夹播放模式，跟随当前曲目）
+            if (on) SyncFolderListSel();
+        }
+
+
+        // 指针是否落在展开的音频列表区（滚轮在该区域时滚动列表而不是切歌）
+        internal bool PointInFolderList(int sx, int sy)
+        {
+            if (!_folderListOn || _folderList == null || !_folderList.Visible) return false;
+            return _folderList.RectangleToScreen(_folderList.ClientRectangle).Contains(sx, sy);
+        }
+
+        // 模式进入提示：指针上方弹出，1.6s 自动消失（复用按钮提示的 TipForm）
+        private void ShowFolderTip(string text)
+        {
+            if (_folderTip == null)
+            {
+                _folderTip = new TipForm();
+                _folderTipTimer = new Timer { Interval = 1600 };
+                _folderTipTimer.Tick += delegate { _folderTipTimer.Stop(); if (_folderTip != null) _folderTip.HideTip(); };
+            }
+            _folderTip.SetText(text);
+            _folderTip.Follow();
+            _folderTip.ShowTip();
+            _folderTipTimer.Stop();
+            _folderTipTimer.Start();
+        }
+
 
         private void UpdateAudioInfoLayout()
         {
@@ -1009,6 +1348,7 @@ namespace HoverExplorer
                 }
                 _audioViz.SetData(_waveData, _waveData, r);
             }
+
         }
 
         // 采集只跟着播放走：暂停即停环回（省 CPU，别的程序出声也不会被白算 FFT），恢复播放再启
@@ -1023,6 +1363,7 @@ namespace HoverExplorer
 
         // 操作栏按下：右下/边缘命中时先走尺寸调整；否则记录起点，等待判定点击还是拖动
         private bool _audioDownInInfo;   // 按下起点在信息区：原地点击=收起（操作栏空白=seek）
+        private bool _audioDownInHead;   // 按下起点在文件夹 head 行：原地点击交给按钮 Click
 
         private void AudioBarDown(object sender, MouseEventArgs e)
         {
@@ -1038,6 +1379,8 @@ namespace HoverExplorer
             }
             _audioDownInInfo = ReferenceEquals(sender, _audioBody) || ReferenceEquals(sender, _audioNameLbl)
                 || ReferenceEquals(sender, _audioTimeLbl) || ReferenceEquals(sender, _audioMetaLbl);
+            _audioDownInHead = ReferenceEquals(sender, _folderHead) || ReferenceEquals(sender, _folderHeadLbl)
+                || ReferenceEquals(sender, _loopBtn) || ReferenceEquals(sender, _folderBtn);
             _audioBarDown = true;
             _audioBarMoved = false;
             _audioBarStart = sp;
@@ -1075,6 +1418,7 @@ namespace HoverExplorer
             _audioBarDown = false;
             ((Control)sender).Capture = false;
             if (_audioBarMoved || _audio == null) return;
+            if (_audioDownInHead) return;   // head 行原地点击：交给按钮 Click
             if (_audioDownInInfo)
             {
                 // 信息区原地点击 = 收起展开
@@ -1118,7 +1462,7 @@ namespace HoverExplorer
             _toolbar = new AudioBarPanel { BackColor = Config.BG, Height = 34 };
             Controls.Add(_toolbar);
 
-            _scrollPanel = new Panel { AutoScroll = true, BackColor = Config.BG };
+            _scrollPanel = new Panel { AutoScroll = false, BackColor = Config.BG };
             Controls.Add(_scrollPanel);
             Win11.ApplyScrollTheme(_scrollPanel, Config.Theme != "light");
 
@@ -1659,13 +2003,23 @@ namespace HoverExplorer
                 if (_form == null || _form.IsDisposed) return false;
                 if (m.Msg != 0x20A) return false;
                 bool ctrl0 = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+                int x = (short)((m.LParam.ToInt64() >> 0) & 0xFFFF);
+                int y = (short)((m.LParam.ToInt64() >> 16) & 0xFFFF);
+                int delta0 = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                // 音频预览：普通滚轮 = 文件夹播放模式（首次滚动进入并提示，继续滚动切歌）
+                if (_form._mediaKind == "audio" && !ctrl0)
+                {
+                    if (!_form.Bounds.Contains(x, y)) return false;
+                    // 列表展开时，指针在列表区内滚轮=滚动列表（交给 ListBox 默认处理）
+                    if (_form.PointInFolderList(x, y)) return false;
+                    _form.AudioWheel(delta0);
+                    return true;
+                }
                 bool isPic = _form._content is PictureBox;
                 // 媒体面板只在 Ctrl+滚轮（缩放窗口）时拦截，普通滚轮交还给控件
                 if (!isPic && !(ctrl0 && _form._content is Panel)) return false;
-                int x = (short)((m.LParam.ToInt64() >> 0) & 0xFFFF);
-                int y = (short)((m.LParam.ToInt64() >> 16) & 0xFFFF);
                 if (!_form.Bounds.Contains(x, y)) return false;
-                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                int delta = delta0;
                 bool ctrl = (Control.ModifierKeys & Keys.Control) == Keys.Control;
                 if (ctrl) _form.ZoomBy(delta);
                 else _form.HandleWheel(delta);
@@ -1681,6 +2035,7 @@ namespace HoverExplorer
             if (_audio != null)
             {
                 // 音频操作栏：播放键 | 波形（占满中段，seek/移窗）| 倍速 | 固定此窗口 | 关闭
+                // ☰ 文件夹列表按钮已移到下方 head（进入文件夹播放模式后显示）
                 _audioPlayBtn.Location = new Point(6, btnY);
                 int vx = 32;
                 int vw = _pinBtn.Left - vx - 6;
@@ -1829,6 +2184,9 @@ namespace HoverExplorer
             if (_audioUiTimer != null) { _audioUiTimer.Stop(); _audioUiTimer.Dispose(); _audioUiTimer = null; }
             if (_audioExpandTimer != null) { _audioExpandTimer.Stop(); _audioExpandTimer.Dispose(); _audioExpandTimer = null; }
             if (_audioFoldTimer != null) { _audioFoldTimer.Stop(); _audioFoldTimer.Dispose(); _audioFoldTimer = null; }
+            if (_folderTipTimer != null) { _folderTipTimer.Stop(); _folderTipTimer.Dispose(); _folderTipTimer = null; }
+
+            if (_folderTip != null) { _folderTip.Close(); _folderTip = null; }
             if (_waveDec != null) { _waveDec.Cancel(); _waveDec = null; }
             if (_audioMeter != null) { _audioMeter.Dispose(); _audioMeter = null; }
             // 音频播放器是挂在 hostPanel.Tag 上的 COM 对象，窗体 Dispose 不会自动调其
@@ -2230,7 +2588,7 @@ namespace HoverExplorer
         private Panel _searchBorder;
         // 顶部名称行：当前文件夹名 + 编辑图标（点击就地改名）
         private Panel _nameRow;
-        private Label _titleLbl;
+        private SmoothLabel _titleLbl;
         private Label _editBtn;
         private TextBox _nameEdit;
         private FlowLayoutPanel _sortFlow;
@@ -2698,7 +3056,7 @@ namespace HoverExplorer
                 // 底色不参与层级着色（Tag=noTint）：否则名称条上下 2px 内边距会露出 LevelBgColor 的彩色描边，
                 // 在浅色主题下呈粉红一圈，与面板割裂
                 _nameRow = new Panel { BackColor = Config.ListBg, Tag = "noTint", Location = new Point(6, curY), Size = new Size(_panelW - 12, 22) };
-                _titleLbl = new Label
+                _titleLbl = new SmoothLabel
                 {
                     Text = ShowName(path),
                     Font = new Font(Config.FontName, Config.FontSize, FontStyle.Bold),

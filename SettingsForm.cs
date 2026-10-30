@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Windows.Forms;
 
@@ -31,6 +32,8 @@ namespace HoverExplorer
         private Button _expandBtn;
         private Label _closeBtn;
         private Label _verLbl;
+        private LinkLabel _updateLbl;
+        private static string _latestVer; // null=未检测, ""=失败, "x.x.x"=最新版
 
         private ToggleSwitch _hoverToggle;
         private ToggleSwitch _cardToggle;
@@ -126,7 +129,7 @@ namespace HoverExplorer
             _cardKey = Config.CardHotkeyKey;
             _entryMods = Config.EntryHotkeyModifiers;
             _entryKey = Config.EntryHotkeyKey;
-            _entryRect = Config.EntryRectW >= 20 ? new Rectangle(Config.EntryRectX, Config.EntryRectY, Config.EntryRectW, Config.EntryRectH) : Rectangle.Empty;
+            _entryRect = Config.EntryRectW >= 5 ? new Rectangle(Config.EntryRectX, Config.EntryRectY, Config.EntryRectW, Config.EntryRectH) : Rectangle.Empty;
             _entryColor = Array.IndexOf(_areaColors, Config.EntryRectColor) >= 0 ? Config.EntryRectColor : _areaColors[0];
 
             // ---- 头部（固定）：标题 + 副标题 + 全部展开/收起 + 关闭 ----
@@ -227,8 +230,8 @@ namespace HoverExplorer
             _viewport.Controls.Add(_scrollBar);
             Controls.Add(_viewport);
 
-            // ==== 组 1：悬停预览（默认展开）====
-            _hoverGroup = _fnNewGroup(I18n.T("group_hover"), true);
+            // ==== 组 1：悬停预览 ====
+            _hoverGroup = _fnNewGroup(I18n.T("group_hover"), false);
             _hoverToggle = new ToggleSwitch { On = Config.HotkeyEnabled };
             _hoverToggle.Toggled += (s, e) => { _fnUpdateHoverState(); _fnApplySettings(true, false); };
             _hoverGroup.SetToggle(_hoverToggle);
@@ -241,51 +244,6 @@ namespace HoverExplorer
             _hoverPill.SetHotkey(_hoverMods, _hoverKey);
             _hoverPill.RecordClick += (s, e) => _fnStartHoverCapture();
             y = _hoverGroup.AddRow(y, I18n.T("hotkey_row"), I18n.T("hotkey_desc"), _hoverPill);
-
-            _delayStepper = new DelayStepper { Value = Config.HoverDelay };
-            _delayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
-            y = _hoverGroup.AddRow(y, I18n.T("delay_row"), I18n.T("hover_delay_desc"), _delayStepper);
-
-            _closeDelayStepper = new MsStepper { Value = Config.CloseDelayMs };
-            _closeDelayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
-            y = _hoverGroup.AddRow(y, I18n.T("close_delay_row"), I18n.T("close_delay_desc"), _closeDelayStepper);
-
-            // 触发区域（收藏·历史入口）独立的悬停延时，不随文件夹悬停延时联动
-            _entryDelayStepper = new MsStepper { Value = Config.EntryRectDelayMs };
-            _entryDelayStepper.ValueChanged += (s, e) => _fnApplySettings(false, false);
-            y = _hoverGroup.AddRow(y, I18n.T("entry_delay_row"), I18n.T("entry_delay_desc"), _entryDelayStepper);
-
-            _keepToggle = new ToggleSwitch { On = Config.KeepOnLeave };
-            _keepToggle.Toggled += (s, e) => _fnApplySettings(false, false);
-            y = _hoverGroup.AddRow(y, I18n.T("keep_open"), I18n.T("keep_open_desc"), _keepToggle);
-
-            _rowSwapToggle = new ToggleSwitch { On = Config.RowSwapSides };
-            // 行布局互换影响已开面板的按钮位置 → 应用时刷新存活面板
-            _rowSwapToggle.Toggled += (s, e) => _fnApplySettings(false, true);
-            y = _hoverGroup.AddRow(y, I18n.T("row_swap"), I18n.T("row_swap_desc"), _rowSwapToggle);
-
-            _altSuppressToggle = new ToggleSwitch { On = Config.AltSuppressHover };
-            _altSuppressToggle.Toggled += (s, e) => _fnApplySettings(false, false);
-            y = _hoverGroup.AddRow(y, I18n.T("alt_suppress"), I18n.T("alt_suppress_desc"), _altSuppressToggle);
-
-            // 窗口边角：直角（卡片风默认）/ 圆角·粗描边（Win11）；切换即时重刷存活窗口
-            _cornerCombo = new ComboBox
-            {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Font = new Font(Config.FontName, 8.5f),
-                Width = 150,
-                Height = 24
-            };
-            _cornerCombo.Items.AddRange(new object[] { I18n.T("corner_square"), I18n.T("corner_round") });
-            _cornerCombo.SelectedIndex = Config.WindowCorners == 1 ? 1 : 0;
-            _cornerCombo.SelectedIndexChanged += (s, e) =>
-            {
-                Config.WindowCorners = _cornerCombo.SelectedIndex;
-                _fnApplySettings(false, false);
-                Program.RefreshWindowCorners();
-                Win11.RefreshNc(Handle);   // 设置窗口自己也跟着切换描边风格
-            };
-            y = _hoverGroup.AddRow(y, I18n.T("corner_row"), I18n.T("corner_desc"), _cornerCombo);
 
             // 暂停触控区：独立框选矩形（设置方式复制触发区域那套：框选按钮+清除+矩形标签+桌面标识块）。
             // 鼠标驻留该区域 0.3s 切换悬停启用/暂停；未框选时仅剩快捷键 Ctrl+Alt+Q
@@ -340,6 +298,52 @@ namespace HoverExplorer
             _hoverGroup.Controls.Add(_pauseClearBtn);
             _hoverGroup.ExpandRow(pauseRowY, Math.Max(RowH, 19 + _pauseRectLbl.PreferredHeight + 8));
             _fnUpdatePauseLbl();
+
+            _delayStepper = new DelayStepper { Value = Config.HoverDelay };
+            _delayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
+            y = _hoverGroup.AddRow(y, I18n.T("delay_row"), I18n.T("hover_delay_desc"), _delayStepper);
+
+            _closeDelayStepper = new MsStepper { Value = Config.CloseDelayMs };
+            _closeDelayStepper.ValueChanged += (s, e) => { _fnRefreshChips(); _fnApplySettings(false, false); };
+            y = _hoverGroup.AddRow(y, I18n.T("close_delay_row"), I18n.T("close_delay_desc"), _closeDelayStepper);
+
+            // 触发区域（收藏·历史入口）独立的悬停延时，不随文件夹悬停延时联动
+            _entryDelayStepper = new MsStepper { Value = Config.EntryRectDelayMs };
+            _entryDelayStepper.ValueChanged += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("entry_delay_row"), I18n.T("entry_delay_desc"), _entryDelayStepper);
+
+            _keepToggle = new ToggleSwitch { On = Config.KeepOnLeave };
+            _keepToggle.Toggled += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("keep_open"), I18n.T("keep_open_desc"), _keepToggle);
+
+            _rowSwapToggle = new ToggleSwitch { On = Config.RowSwapSides };
+            // 行布局互换影响已开面板的按钮位置 → 应用时刷新存活面板
+            _rowSwapToggle.Toggled += (s, e) => _fnApplySettings(false, true);
+            y = _hoverGroup.AddRow(y, I18n.T("row_swap"), I18n.T("row_swap_desc"), _rowSwapToggle);
+
+            _altSuppressToggle = new ToggleSwitch { On = Config.AltSuppressHover };
+            _altSuppressToggle.Toggled += (s, e) => _fnApplySettings(false, false);
+            y = _hoverGroup.AddRow(y, I18n.T("alt_suppress"), I18n.T("alt_suppress_desc"), _altSuppressToggle);
+
+            // 窗口边角：直角（卡片风默认）/ 圆角·粗描边（Win11）；切换即时重刷存活窗口
+            _cornerCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font(Config.FontName, 8.5f),
+                Width = 150,
+                Height = 24
+            };
+            _cornerCombo.Items.AddRange(new object[] { I18n.T("corner_square"), I18n.T("corner_round") });
+            _cornerCombo.SelectedIndex = Config.WindowCorners == 1 ? 1 : 0;
+            _cornerCombo.SelectedIndexChanged += (s, e) =>
+            {
+                Config.WindowCorners = _cornerCombo.SelectedIndex;
+                _fnApplySettings(false, false);
+                Program.RefreshWindowCorners();
+                Win11.RefreshNc(Handle);   // 设置窗口自己也跟着切换描边风格
+            };
+            y = _hoverGroup.AddRow(y, I18n.T("corner_row"), I18n.T("corner_desc"), _cornerCombo);
+
 
             _hoverGroup.FinishRows();
 
@@ -446,7 +450,7 @@ namespace HoverExplorer
             const string preset = "bg=f7f3ee\nzb=f0e9de\nfg=3b2f25\nmu=8a7664\nhv=ecdcc3\nsel=8a5a3c\nselfg=ffffff\nbar=e6d2ab\ndrop=2d7a3d\nac=8a5a3c\nacfg=ffffff\nbd=d6c7b2\nsb=c4b399\nhdbg=f0e8dc\nbtnhv=e0d0b8\ncanvas=f7f3ee";
             var promptText = I18n.T("palette_prompt_text");
             string[] palKeys = { "bg","zb","fg","mu","hv","sel","selfg","bar","drop","ac","acfg","bd","sb","hdbg","btnhv","canvas" };
-            string[] palLabels = { "行背景(奇)","斑马(偶)","名称文字","大小/数量","悬停高亮","选中背景","选中文字","大小背景条","拖拽放置","排序按钮底","排序按钮字","边框分隔线","滚动条","表头底色","按钮悬停","画布底色" };
+            string[] palLabels = Array.ConvertAll(palKeys, k => I18n.T("pal_lbl_" + k));
 
             // 行 1：方案下拉 + 删除 + 另存为（选中/改即应用，无应用按钮）；行 2：暖灰斑马 + 清空（拆行避免右侧溢出截断）
             int row1Y = AccGroup.HeadH + y;
@@ -480,7 +484,7 @@ namespace HoverExplorer
                 int ry = i * 24;
                 var lbl = new Label { Text = palLabels[i], Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, ry + 3), AutoSize = true };
                 var block = new Panel { Location = new Point(92, ry + 1), Size = new Size(24, 20), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
-                var hex = new TextBox { Location = new Point(122, ry), Size = new Size(64, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
+                var hex = new TextBox { Location = new Point(122, ry), Size = new Size(100, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
                 editorPanel.Controls.Add(lbl); editorPanel.Controls.Add(block); editorPanel.Controls.Add(hex);
                 hexBoxes[i] = hex; colorBlocks[i] = block;
                 int idx = i;
@@ -578,6 +582,15 @@ namespace HoverExplorer
                 }
                 if (hit == 0) { MessageBox.Show(this, I18n.T("paste_invalid"), Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
                 fillEditor(clip); applyNow();
+                // 自动另存为方案（不弹命名框）：导入时间命名，重名追加序号
+                string baseName = I18n.T("imported_prefix") + " " + DateTime.Now.ToString("MM-dd HH:mm");
+                string nm = baseName; int dup = 2;
+                while (schemes0.Exists(kv => kv.Key == nm)) nm = baseName + " (" + (dup++) + ")";
+                schemes0.Add(new KeyValuePair<string, string>(nm, Config.ListPalette));
+                var sbSave = new System.Text.StringBuilder();
+                foreach (var kv in schemes0) sbSave.Append(kv.Key.Replace("=", "\\e")).Append('=').Append(kv.Value.Replace("\n", "\\n").Replace("=", "\\e")).Append('\n');
+                Config.ListPalettesData = sbSave.ToString(); Config.Save(); reloadCombo(schemes0);
+                schemeCombo.SelectedIndex = schemeCombo.Items.Count - 1;
             };
             palGroup.ExpandRow(row3Y - AccGroup.HeadH + 34, 0);
             palGroup.FinishRows();
@@ -595,6 +608,140 @@ namespace HoverExplorer
             _cardPill.SetHotkey(_cardMods, _cardKey);
             _cardPill.RecordClick += (s, e) => _fnStartCardCapture();
             y = _cardGroup.AddRow(y, I18n.T("hotkey_row"), I18n.T("card_hotkey_desc"), _cardPill);
+
+            // ---- 卡片配色编辑器（方案下拉 + 色块编辑 + 字体 + 导入，参考列表配色）----
+            string[] cpKeys = { "bg", "fg", "badge_bg", "badge_fg", "strip" };
+            string[] cpLabels = Array.ConvertAll(cpKeys, k => I18n.T("cp_lbl_" + k));
+            int cpRow1Y = AccGroup.HeadH + y;
+            var cpSchemeLbl = new Label { Text = I18n.T("palette_scheme") + ":", Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(12, cpRow1Y + 4), AutoSize = true, Visible = false };
+            _cardGroup.Controls.Add(cpSchemeLbl);
+            var cpSchemeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Font = new Font(Config.FontName, 9f), Location = new Point(12 + cpSchemeLbl.PreferredWidth + 8, cpRow1Y), Width = 130, BackColor = Config.BG, ForeColor = Config.FG, Visible = false };
+            _cardGroup.Controls.Add(cpSchemeCombo);
+            Func<string, Button> cpBtn = delegate(string text) { var b = new Button { Text = text, Font = new Font(Config.FontName, 9f), FlatStyle = FlatStyle.Flat, BackColor = Config.BG, ForeColor = Config.FG, Height = 26, Visible = false }; b.FlatAppearance.BorderColor = Config.Border; return b; };
+            Action cpApply = null;
+            var cpBtnDel = cpBtn(I18n.T("del_scheme")); var cpBtnSaveAs = cpBtn(I18n.T("save_as"));
+            var cpBtnImport = cpBtn(I18n.T("paste_import"));
+            var cpBtnUpdate = cpBtn(I18n.T("update_scheme"));
+            cpBtnDel.Location = new Point(cpSchemeCombo.Right + 8, cpRow1Y); cpBtnSaveAs.Location = new Point(cpBtnDel.Right + 8, cpRow1Y);
+            _cardGroup.Controls.Add(cpBtnDel); _cardGroup.Controls.Add(cpBtnSaveAs);
+            int cpRow2Y = cpRow1Y + 32;
+            var cpEditor = new Panel { Location = new Point(12, cpRow2Y), Size = new Size(_cardGroup.Width - 24, cpKeys.Length * 24 + 4 * 24 + 14), BackColor = Config.BG, Visible = false };
+            _cardGroup.Controls.Add(cpEditor);
+            var cpHex = new TextBox[cpKeys.Length]; var cpBlk = new Panel[cpKeys.Length];
+            for (int i = 0; i < cpKeys.Length; i++)
+            {
+                int ry = i * 24;
+                cpEditor.Controls.Add(new Label { Text = cpLabels[i], Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, ry + 3), AutoSize = true });
+                var blk = new Panel { Location = new Point(92, ry + 1), Size = new Size(24, 20), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
+                var hx = new TextBox { Location = new Point(122, ry), Size = new Size(184, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
+                cpEditor.Controls.Add(blk); cpEditor.Controls.Add(hx); cpHex[i] = hx; cpBlk[i] = blk;
+                int idx = i;
+                blk.Paint += (sender, pe) => { var p = (Panel)sender; var g = pe.Graphics; using (var bw = new SolidBrush(Color.White)) using (var bg = new SolidBrush(Color.FromArgb(0xCC, 0xCC, 0xCC))) for (int bx = 0; bx < p.Width; bx += 5) for (int by = 0; by < p.Height; by += 5) g.FillRectangle(((bx / 5 + by / 5) & 1) == 0 ? bw : bg, bx, by, 5, 5); using (var b = new SolidBrush(p.BackColor)) g.FillRectangle(b, p.ClientRectangle); };
+                blk.Click += (s, e) => { using (var cd = new ColorDialog()) { cd.Color = Color.FromArgb(255, cpBlk[idx].BackColor); if (cd.ShowDialog() == DialogResult.OK) { var old = cpBlk[idx].BackColor; var nc = Color.FromArgb(old.A, cd.Color.R, cd.Color.G, cd.Color.B); cpBlk[idx].BackColor = nc; cpHex[idx].Text = CardPalette.ToRgba(nc); cpBtnUpdate.Visible = true; } } };
+                blk.MouseDown += (s, e) => { if (e.Button == MouseButtons.Right) { using (var af = new Form { Text = "Alpha 0-255", Width = 200, Height = 110, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false }) { var nud = new NumericUpDown { Location = new Point(20, 15), Width = 80, Minimum = 0, Maximum = 255, Value = cpBlk[idx].BackColor.A }; var ok = new Button { Text = "OK", Location = new Point(110, 13), Width = 60, Height = 26, DialogResult = DialogResult.OK }; af.Controls.Add(nud); af.Controls.Add(ok); if (af.ShowDialog(this) == DialogResult.OK) { var old = cpBlk[idx].BackColor; var nc = Color.FromArgb((int)nud.Value, old.R, old.G, old.B); cpBlk[idx].BackColor = nc; cpHex[idx].Text = CardPalette.ToRgba(nc); cpBtnUpdate.Visible = true; } } } };
+            }
+            // 色条宽 + 字体 + 字号 + 圆角（纵向排列，与上方颜色行对齐）
+            int cpExtraY = cpKeys.Length * 24 + 2;
+            const int cpAttrX = 92;
+            cpEditor.Controls.Add(new Label { Text = I18n.T("cp_strip_w"), Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, cpExtraY + 3), AutoSize = true });
+            var cpStripW = new NumericUpDown { Location = new Point(cpAttrX, cpExtraY), Size = new Size(46, 22), Minimum = 0, Maximum = 10, Font = new Font(Config.FontName, 9f) };
+            cpEditor.Controls.Add(cpStripW);
+            int cpFontY = cpExtraY + 24;
+            cpEditor.Controls.Add(new Label { Text = I18n.T("cp_font"), Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, cpFontY + 3), AutoSize = true });
+            var cpFontCombo = new ComboBox { Location = new Point(cpAttrX, cpFontY), Size = new Size(200, 22), Font = new Font(Config.FontName, 9f), DropDownStyle = ComboBoxStyle.DropDownList };
+            using (var ifc = new InstalledFontCollection())
+                foreach (var ff in ifc.Families)
+                    cpFontCombo.Items.Add(ff.Name);
+            cpEditor.Controls.Add(cpFontCombo);
+            int cpSizeY = cpFontY + 24;
+            cpEditor.Controls.Add(new Label { Text = I18n.T("cp_font_size"), Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, cpSizeY + 3), AutoSize = true });
+            var cpFontSize = new NumericUpDown { Location = new Point(cpAttrX, cpSizeY), Size = new Size(46, 22), Minimum = 6, Maximum = 24, Font = new Font(Config.FontName, 9f) };
+            cpEditor.Controls.Add(cpFontSize);
+            int cpRadY = cpSizeY + 24;
+            cpEditor.Controls.Add(new Label { Text = I18n.T("cp_radius"), Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, cpRadY + 3), AutoSize = true });
+            var cpRadius = new NumericUpDown { Location = new Point(cpAttrX, cpRadY), Size = new Size(46, 22), Minimum = 0, Maximum = 12, Font = new Font(Config.FontName, 9f) };
+            cpEditor.Controls.Add(cpRadius);
+            // AI 提示词 + 复制 + 粘贴导入
+            int cpPromptY = cpRow2Y + cpEditor.Height + 4;
+            var cpPromptLbl = new Label { Text = I18n.T("palette_prompt"), Font = new Font(Config.FontName, 9f, FontStyle.Bold), ForeColor = Config.FG, Location = new Point(12, cpPromptY + 4), AutoSize = true, Visible = false };
+            _cardGroup.Controls.Add(cpPromptLbl);
+            var cpBtnCopyPrompt = cpBtn(I18n.T("copy_prompt"));
+            cpBtnCopyPrompt.Location = new Point(cpPromptLbl.Right + 8, cpPromptY);
+            _cardGroup.Controls.Add(cpBtnCopyPrompt);
+            cpBtnImport.Location = new Point(cpBtnCopyPrompt.Right + 8, cpPromptY);
+            _cardGroup.Controls.Add(cpBtnImport);
+            cpBtnUpdate.Location = new Point(cpBtnImport.Right + 8, cpPromptY);
+            cpBtnUpdate.Visible = false;
+            _cardGroup.Controls.Add(cpBtnUpdate);
+            var cpPromptText = I18n.T("card_palette_prompt_text");
+            cpBtnCopyPrompt.Click += (s, e) => { try { Clipboard.SetText(cpPromptText); } catch { } };
+            // 填充编辑器
+            Action<CardPalette> cpFill = delegate(CardPalette p) {
+                if (p == null) return;
+                var vals = new Dictionary<string, Color> { {"bg",p.Bg},{"fg",p.Fg},{"badge_bg",p.BadgeBg},{"badge_fg",p.BadgeFg},{"strip",p.StripColor} };
+                for (int i = 0; i < cpKeys.Length; i++) { Color c; vals.TryGetValue(cpKeys[i], out c); cpBlk[i].BackColor = c; cpHex[i].Text = CardPalette.ToRgba(c); }
+                cpStripW.Value = Math.Max(0, Math.Min(10, p.StripWidth));
+                if (cpFontCombo.Items.Contains(p.FontName)) cpFontCombo.SelectedItem = p.FontName; else { cpFontCombo.Items.Add(p.FontName); cpFontCombo.SelectedItem = p.FontName; }
+                cpFontSize.Value = (decimal)Math.Max(6, Math.Min(24, p.FontSize));
+                cpRadius.Value = Math.Max(0, Math.Min(12, p.Radius));
+                cpBtnUpdate.Visible = false;
+            };
+            // 应用编辑器值到当前方案 + 保存 + 刷新卡片
+
+            cpApply = delegate() {
+                int si = Config.CardPaletteIndex;
+                if (si < 0 || si >= CardPalettes.All.Count) return;
+                var p = CardPalettes.All[si];
+                p.Bg = cpBlk[0].BackColor; p.Fg = cpBlk[1].BackColor;
+                p.BadgeBg = cpBlk[2].BackColor; p.BadgeFg = cpBlk[3].BackColor; p.StripColor = cpBlk[4].BackColor;
+                p.StripWidth = (int)cpStripW.Value; p.FontName = (string)cpFontCombo.SelectedItem ?? "微软雅黑"; p.FontSize = (float)cpFontSize.Value; p.Radius = (int)cpRadius.Value;
+                bool dark = CardPalette.Lum(p.Bg) < 128; p.Hover = CardPalette.Mix(p.Bg, dark ? Color.White : Color.Black, dark ? 0.10 : 0.07); p.Sub = CardPalette.Mix(p.Fg, p.Bg, 0.45);
+                CardPalettes.Save(); Config.Save();
+            };
+            for (int i = 0; i < cpKeys.Length; i++) { int idx = i; cpHex[i].Leave += (s, e) => { var txt = cpHex[idx].Text.Trim(); Color nc; if (txt.StartsWith("rgba", StringComparison.OrdinalIgnoreCase) || txt.StartsWith("rgb", StringComparison.OrdinalIgnoreCase)) nc = CardPalette.Hx(txt); else { var h = txt.TrimStart('#'); if (System.Text.RegularExpressions.Regex.IsMatch(h, "^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$")) nc = CardPalette.Hx(h); else return; } cpBlk[idx].BackColor = nc; cpBtnUpdate.Visible = true; }; }
+            cpStripW.ValueChanged += (s, e) => cpBtnUpdate.Visible = true;
+            cpFontCombo.SelectedIndexChanged += (s, e) => cpBtnUpdate.Visible = true;
+            cpFontSize.ValueChanged += (s, e) => cpBtnUpdate.Visible = true;
+            cpRadius.ValueChanged += (s, e) => cpBtnUpdate.Visible = true;
+            // 方案下拉
+            Action cpRefreshSchemes = delegate() {
+                int cur = Config.CardPaletteIndex;
+                cpSchemeCombo.Items.Clear();
+                foreach (var p in CardPalettes.All) cpSchemeCombo.Items.Add(p.Name);
+                if (cur >= 0 && cur < cpSchemeCombo.Items.Count) cpSchemeCombo.SelectedIndex = cur;
+            };
+            cpSchemeCombo.SelectedIndexChanged += (s, e) => { if (cpSchemeCombo.SelectedIndex >= 0) { Config.CardPaletteIndex = cpSchemeCombo.SelectedIndex; cpFill(CardPalettes.Current); Config.Save(); } };
+            cpBtnSaveAs.Click += (s, e) => {
+                var nm = PromptName(I18n.T("scheme_name"), I18n.T("save_as"));
+                if (string.IsNullOrEmpty(nm)) return;
+                var src = CardPalettes.Current; if (src == null) return;
+                var np = new CardPalette { Name = nm, Bg = src.Bg, Fg = src.Fg, BadgeBg = src.BadgeBg, BadgeFg = src.BadgeFg, StripColor = src.StripColor, StripWidth = src.StripWidth, FontName = src.FontName, FontSize = src.FontSize };
+                np.Hover = src.Hover; np.Sub = src.Sub;
+                CardPalettes.All.Add(np); Config.CardPaletteIndex = CardPalettes.All.Count - 1;
+                CardPalettes.Save(); Config.Save(); cpRefreshSchemes(); cpFill(np);
+            };
+            cpBtnDel.Click += (s, e) => {
+                if (CardPalettes.All.Count <= 1) return;
+                int si = Config.CardPaletteIndex;
+                CardPalettes.All.RemoveAt(si); Config.CardPaletteIndex = Math.Max(0, si - 1);
+                CardPalettes.Save(); Config.Save(); cpRefreshSchemes(); cpFill(CardPalettes.Current);
+            };
+            cpBtnImport.Click += (s, e) => {
+                string clip = null; try { clip = Clipboard.GetText(); } catch { }
+                if (string.IsNullOrEmpty(clip)) { MessageBox.Show(this, I18n.T("paste_invalid"), Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+                // 自动保存为新方案（不覆盖当前方案，不弹命名框）：导入时间命名，重名追加序号
+                var parsed = CardPalette.Parse(clip, null);
+                string baseName = I18n.T("imported_prefix") + " " + DateTime.Now.ToString("MM-dd HH:mm");
+                string nm = baseName; int dup = 2;
+                while (CardPalettes.All.Exists(p => p.Name == nm)) nm = baseName + " (" + (dup++) + ")";
+                parsed.Name = nm; parsed.Radius = Math.Max(0, Math.Min(12, parsed.Radius));
+                CardPalettes.All.Add(parsed); Config.CardPaletteIndex = CardPalettes.All.Count - 1;
+                CardPalettes.Save(); Config.Save();
+                cpRefreshSchemes(); cpFill(parsed); Program.RefreshAllCards();
+            };
+            cpBtnUpdate.Click += (s, e) => { cpApply(); Program.RefreshAllCards(); cpBtnUpdate.Visible = false; };
+            cpRefreshSchemes(); cpFill(CardPalettes.Current);
+            _cardGroup.ExpandRow(cpBtnImport.Bottom - AccGroup.HeadH + 4, 0);
             _cardGroup.FinishRows();
 
 
@@ -748,7 +895,7 @@ namespace HoverExplorer
             {
                 try { Clipboard.SetText("jtugqivi"); MessageBox.Show(I18n.T("donated"), I18n.T("donate"), MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { }
             };
-            var aboutGroup = _fnNewGroup(I18n.T("group_about"), false);
+            var aboutGroup = _fnNewGroup(I18n.T("group_about"), true);
             const int qrSize = 150;
             Image qrImg = null;
             try { var s = typeof(SettingsForm).Assembly.GetManifestResourceStream("HoverExplorer.donate_qr.png"); if (s != null) qrImg = Image.FromStream(s); } catch { }
@@ -766,9 +913,23 @@ namespace HoverExplorer
             aboutGroup.Controls.Add(donateLbl);
             var link1 = MakeLink("GitHub Releases", linkX, aboutBase + 28, "https://github.com/dlsdgj/HoverExplorer/releases"); link1.Visible = false; aboutGroup.Controls.Add(link1);
             var link2 = MakeLink("百度网盘 (pwd: hbf8)", linkX, aboutBase + 52, "https://pan.baidu.com/s/12rp6LTe7Y8oSErvP8wTLgA?pwd=hbf8"); link2.Visible = false; aboutGroup.Controls.Add(link2);
+            var linkCardGen = MakeLink(I18n.T("card_gen_link"), linkX, aboutBase + 76, "https://dlsdgj.github.io/hoverexplorer-card-palette/"); linkCardGen.Visible = false; aboutGroup.Controls.Add(linkCardGen);
             _verLbl = new Label { Text = "v" + Program.Version, AutoSize = true, ForeColor = Config.PlaceholderFg, Font = new Font(Config.FontName, 8f), Tag = "sub", Visible = false };
             _verLbl.Location = new Point(aboutGroup.Width - PadX - 18 - _verLbl.PreferredWidth, aboutBase + qrSize - _verLbl.PreferredHeight);
             aboutGroup.Controls.Add(_verLbl);
+            // 更新检测：异步查 GitHub latest release，新版则在版本号左侧显示红点标识，点击打开 Releases
+            _updateLbl = new LinkLabel { Text = "", AutoSize = true, Font = new Font(Config.FontName, 8f, FontStyle.Bold), Tag = "sub", Visible = false, LinkColor = Color.FromArgb(0xE0, 0x31, 0x31), ActiveLinkColor = Color.FromArgb(0xE0, 0x31, 0x31) };
+            _updateLbl.LinkClicked += (s, e) => { try { System.Diagnostics.Process.Start("https://github.com/dlsdgj/HoverExplorer/releases"); } catch { } };
+            aboutGroup.Controls.Add(_updateLbl);
+            _fnCheckUpdate(latest =>
+            {
+                if (IsDisposed || _updateLbl == null || _verLbl == null) return;
+                if (_fnNewer(latest))
+                {
+                    _updateLbl.Text = "● v" + latest + " ↗";
+                    _updateLbl.Location = new Point(_verLbl.Left - 10 - _updateLbl.PreferredWidth, _verLbl.Top);
+                }
+            });
 
             // MP3 预览慢的科普说明 + 修复工具入口（拖拽转换容器型假 MP3）
             int mp3Y = aboutBase + qrSize + 10;
@@ -802,8 +963,26 @@ namespace HoverExplorer
                 }
             };
             aboutGroup.Controls.Add(fixerLink);
-            aboutGroup.ExpandRow(mp3Body.Bottom + 40 - AccGroup.HeadH, 0);
+            // Windows Defender 误报说明
+            int wdY = fixerLink.Bottom + 14;
+            var wdTitle = new Label { Text = I18n.T("wd_notice_title"), Location = new Point(PadX, wdY), AutoSize = true, Font = new Font(Config.FontName, 8.5f, FontStyle.Bold), Tag = "sub", Visible = false };
+            aboutGroup.Controls.Add(wdTitle);
+            var wdBody = new Label
+            {
+                Text = I18n.T("wd_notice_body"),
+                Location = new Point(PadX, wdY + 20),
+                AutoSize = false,
+                Size = new Size(aboutGroup.Width - PadX * 2, 80),
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub",
+                Visible = false
+            };
+            wdBody.Height = Math.Max(60, (int)Math.Ceiling((double)TextRenderer.MeasureText(wdBody.Text, wdBody.Font, wdBody.Size, TextFormatFlags.WordBreak).Height / 12.0) * 12 + 4);
+            aboutGroup.Controls.Add(wdBody);
+            aboutGroup.ExpandRow(wdBody.Bottom + 20 - AccGroup.HeadH, 0);
             aboutGroup.FinishRows();
+            if (aboutGroup.Open) { aboutGroup.Open = false; aboutGroup.Open = true; }
 
             _fnUpdateAreaLbl();
             _fnRefreshChips();
@@ -890,6 +1069,53 @@ namespace HoverExplorer
             }
             _fnSyncScroll();
             _fnUpdateExpandBtn();
+        }
+
+        // GitHub latest release 版本检测（静态缓存，多次开设置只查一次）
+        private static void _fnCheckUpdate(Action<string> done)
+        {
+            if (_latestVer != null) { done(_latestVer); return; }
+            try
+            {
+                var wc = new System.Net.WebClient();
+                wc.Headers.Add("user-agent", "HoverExplorer/" + Program.Version);
+                wc.DownloadStringCompleted += (s, e) =>
+                {
+                    string res = "";
+                    try
+                    {
+                        if (e.Error == null && e.Result != null)
+                        {
+                            var m = System.Text.RegularExpressions.Regex.Match(e.Result.ToString(), @"""tag_name""\s*:\s*""v?([\d.]+)""");
+                            if (m.Success) res = m.Groups[1].Value;
+                        }
+                    }
+                    catch { }
+                    _latestVer = res;
+                    try { done(res); } catch { }
+                };
+                wc.DownloadStringAsync(new Uri("https://api.github.com/repos/dlsdgj/HoverExplorer/releases/latest"));
+            }
+            catch { _latestVer = ""; try { done(""); } catch { } }
+        }
+
+        private static bool _fnNewer(string latest)
+        {
+            if (string.IsNullOrEmpty(latest)) return false;
+            try
+            {
+                var a = Program.Version.Split('.');
+                var b = latest.Split('.');
+                for (int i = 0; i < Math.Max(a.Length, b.Length); i++)
+                {
+                    int ai = i < a.Length ? int.Parse(a[i]) : 0;
+                    int bi = i < b.Length ? int.Parse(b[i]) : 0;
+                    if (bi > ai) return true;
+                    if (bi < ai) return false;
+                }
+            }
+            catch { }
+            return false;
         }
 
         // ================= 自绘滚动 =================
@@ -1056,11 +1282,11 @@ namespace HoverExplorer
         private void _fnUpdateAreaLbl()
         {
             if (_areaLbl == null) return;
-            _areaLbl.Text = _entryRect.Width >= 20
+            _areaLbl.Text = _entryRect.Width > 0
                 ? string.Format(I18n.T("area_fmt"), _entryRect.Width, _entryRect.Height, _entryRect.X, _entryRect.Y)
                 : I18n.T("area_none");
             if (_entryGroup != null)
-                _entryGroup.SetChip(1, _entryRect.Width >= 20 ? string.Format("{0}×{1}", _entryRect.Width, _entryRect.Height) : "");
+                _entryGroup.SetChip(1, _entryRect.Width > 0 ? string.Format("{0}×{1}", _entryRect.Width, _entryRect.Height) : "");
             // 即改即生效：桌面色块先按当前值立即刷新，随后整批写入 Config 并保存
             Program.UpdateEntryIndicator(_entryRect, _entryColor);
             _fnApplySettings(false, false);

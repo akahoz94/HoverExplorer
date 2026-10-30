@@ -13,7 +13,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.8.5";
+        public const string Version = "1.0.9";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -1011,7 +1011,7 @@ namespace HoverExplorer
                 bool dragFromPanel = _panels.Any(p => !p.IsDisposed && p.IsDragging);
                 // 拖拽会话（左键按住，含 OLE 从面板行/Explorer 拖出）：光标进入触发区 → 立即弹
                 // 收藏·历史列表接收拖放（无悬停延时；穿透色块窗收不到 OLE 消息，只能走光标判定）
-                if (Config.EntryRectW >= 20 && Config.EntryRectH >= 20
+                if (Config.EntryRectW >= 5 && Config.EntryRectH >= 5
                     && mx >= Config.EntryRectX && mx < Config.EntryRectX + Config.EntryRectW
                     && my >= Config.EntryRectY && my < Config.EntryRectY + Config.EntryRectH
                     && (_entryListForm == null || _entryListForm.IsDisposed))
@@ -1122,7 +1122,7 @@ namespace HoverExplorer
             // 触发区域（桌面上的入口矩形）：区域内悬停延时弹 收藏·历史 列表，并抑制桌面图标悬停
             // _entryArmed：点击行打开 Explorer 后解除武装——鼠标须先离开区域再回来才会重新弹列表，
             // 否则列表刚关（点击 Close）鼠标仍在区域内，HoverDelay 后立刻重弹，盖住刚打开的 Explorer
-            bool inEntryRect = Config.EntryRectW >= 20 && Config.EntryRectH >= 20
+            bool inEntryRect = Config.EntryRectW >= 5 && Config.EntryRectH >= 5
                 && mx >= Config.EntryRectX && mx < Config.EntryRectX + Config.EntryRectW
                 && my >= Config.EntryRectY && my < Config.EntryRectY + Config.EntryRectH;
 
@@ -1159,13 +1159,15 @@ namespace HoverExplorer
                 {
                     hoverPath = ResolveHiddenExt(DetectDesktopItem(mx, my, out hoverRect, out hoverIsDir));
                 }
-                else if (Config.ExplorerEnabled || Config.TcEnabled)
+                else if (Config.ExplorerEnabled || Config.TcEnabled || Config.PerchEnabled)
                 {
                     // TC 优先：鼠标在 TC 主窗口上时 Explorer 检测必然落空，先走 TC 免得白跑
                     if (Config.TcEnabled)
                         hoverPath = ResolveHiddenExt(TcSupport.DetectHoverItem(mx, my, out hoverRect, out hoverIsDir));
                     if (hoverPath == null && Config.ExplorerEnabled)
                         hoverPath = ResolveHiddenExt(ExplorerSupport.DetectHoverItem(mx, my, out hoverRect, out hoverIsDir));
+                    if (hoverPath == null && Config.PerchEnabled)
+                        hoverPath = PerchSupport.DetectHoverItem(mx, my, out hoverRect, out hoverIsDir);
                 }
             }
 
@@ -1245,7 +1247,35 @@ namespace HoverExplorer
                         ShowHighlight(hoverRect);
                         _panels.Add(p2);
                         p2.Show();
-                        DebugLog("[panel] OPENED at " + p2.Left + "," + p2.Top + " size " + p2.Width + "x" + p2.Height);
+                        NativeMethods.SetWindowPos(p2.Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                        DebugLog("[panel] OPENED at " + p2.Left + "," + p2.Top + " size " + p2.Width + "x" + p2.Height
+                            + " visible=" + p2.Visible + " topmost=" + p2.TopMost);
+                        // 截图面板区域确认是否真的可见
+                        try
+                        {
+                            using (var bmp = new System.Drawing.Bitmap(p2.Width, p2.Height))
+                            using (var g = System.Drawing.Graphics.FromImage(bmp))
+                            {
+                                g.CopyFromScreen(p2.Left, p2.Top, 0, 0, bmp.Size);
+                                bmp.Save("C:\\Users\\Administrator\\Desktop\\HoverFolder\\cs\\panel_shot.png");
+                            }
+                            DebugLog("[panel] shot saved");
+                        }
+                        catch (Exception ex) { DebugLog("[panel] shot err: " + ex.Message); }
+                        // 诊断：z 序在面板上方的窗口
+                        var prev = NativeMethods.GetWindow(p2.Handle, NativeMethods.GW_HWNDPREV);
+                        int cnt = 0;
+                        while (prev != IntPtr.Zero && cnt < 4)
+                        {
+                            var sb = new System.Text.StringBuilder(256);
+                            NativeMethods.GetWindowTextW(prev, sb, 256);
+                            var cls = new System.Text.StringBuilder(256);
+                            NativeMethods.GetClassNameW(prev, cls, 256);
+                            DebugLog("[panel] above" + cnt + ": [" + sb + "] cls=" + cls);
+                            prev = NativeMethods.GetWindow(prev, NativeMethods.GW_HWNDPREV);
+                            cnt++;
+                        }
                     }
                 }
             }
@@ -1422,6 +1452,19 @@ namespace HoverExplorer
                 Win11.RefreshNc(_entryListForm.Handle);
         }
 
+        // 刷新所有桌面卡片配色（设置面板编辑卡片配色后即改即生效）
+        internal static void RefreshAllCards()
+        {
+            foreach (var c in _pinCards)
+            {
+                if (c.IsDisposed || !c.IsHandleCreated) continue;
+                c.ApplyPalette();
+                c.Invalidate(true);
+            }
+            if (_entryCardForm != null && !_entryCardForm.IsDisposed && _entryCardForm.IsHandleCreated)
+                _entryCardForm.ApplyPalette();
+        }
+
         // 设置面板即改即生效：统一落盘 + 桌面色块/托盘文案刷新，按需重注册热键、刷新存活面板
         internal static void ApplySettingsLive(bool hotkeys, bool panels)
         {            Config.Save();
@@ -1451,7 +1494,7 @@ namespace HoverExplorer
         // 带暂存值的重载：设置面板里区域/颜色未确定前，桌面色块先按暂存值实时预览（取消时按 Config 还原）
         internal static void UpdateEntryIndicator(Rectangle rect, int argb)
         {
-            bool valid = rect.Width >= 20 && rect.Height >= 20;
+            bool valid = rect.Width >= 5 && rect.Height >= 5;
             if (!valid)
             {
                 if (_entryIndicator != null)

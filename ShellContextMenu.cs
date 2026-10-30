@@ -77,6 +77,7 @@ namespace HoverExplorer
         const uint MF_SEPARATOR = 0x0800;
         const uint MF_STRING = 0x0000;
         const uint CMD_UNPIN = 0x8000;
+        const uint CMD_ADDPALETTE = 0x8001;
         static readonly Guid IID_IContextMenu = new Guid("000214E4-0000-0000-C000-000000000046");
         static readonly Guid IID_IShellFolder = new Guid("000214E6-0000-0000-C000-000000000046");
 
@@ -94,7 +95,7 @@ namespace HoverExplorer
             return _menuOwner.Handle;
         }
 
-        public static void Show(string path, IntPtr hwndOwner, Action onUnpin)
+        public static void Show(string path, IntPtr hwndOwner, Action onUnpin, Action onAddPalette = null)
         {
             try
             {
@@ -117,10 +118,11 @@ namespace HoverExplorer
                 var hMenu = CreatePopupMenu();
                 int qhr = cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL);
                 Program.DebugLog("[shell] QueryContextMenu hr=0x" + qhr.ToString("X"));
-                if (onUnpin != null)
+                if (onUnpin != null || onAddPalette != null)
                 {
                     AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                    AppendMenu(hMenu, MF_STRING, CMD_UNPIN, I18n.T("unpin"));
+                    if (onAddPalette != null) AppendMenu(hMenu, MF_STRING, CMD_ADDPALETTE, I18n.T("card_add_palette"));
+                    if (onUnpin != null) AppendMenu(hMenu, MF_STRING, CMD_UNPIN, I18n.T("unpin"));
                 }
                 POINT pt; GetCursorPos(out pt);
                 Program.ShellMenuOpen = true;
@@ -138,6 +140,7 @@ namespace HoverExplorer
                 finally { Program.ShellMenuOpen = false; Program.DebugLog("[shell] menu closed, flag=false"); }
                 Program.DebugLog("[shell] fg=" + fgOk + " cmd=" + cmd);
                 if (cmd == CMD_UNPIN) { if (onUnpin != null) onUnpin(); }
+                else if (cmd == CMD_ADDPALETTE) { if (onAddPalette != null) onAddPalette(); }
                 else if (cmd > 0)
                 {
                     // 优先拿 Unicode 动词名（GCS_VERBW）；lpVerb 传字符串数字会被当"动词名"查表而失败

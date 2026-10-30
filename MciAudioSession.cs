@@ -170,8 +170,27 @@ namespace HoverExplorer
                 _opened = true;
                 var o = Opened; if (o != null) { try { o(); } catch { } }
                 Play();
+                StartEndPoll();
             }
             else _failed = true;
+        }
+
+        private void StartEndPoll()
+        {
+            if (_poll != null) { try { _poll.Stop(); _poll.Dispose(); } catch { } }
+            _poll = new Timer { Interval = 200 };
+            _poll.Tick += (s, ev) =>
+            {
+                if (_endedFired || !_playing) return;
+                var tot = _total.TotalMilliseconds;
+                if (tot > 0 && Position.TotalMilliseconds >= tot - 40)
+                {
+                    _endedFired = true;
+                    _playing = false;
+                    var en = Ended; if (en != null) { try { en(); } catch { } }
+                }
+            };
+            _poll.Start();
         }
 
         public void Close()

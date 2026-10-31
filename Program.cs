@@ -211,6 +211,10 @@ namespace HoverExplorer
                 Text = "HoverExplorer",
             };
             var trayMenu = new ContextMenuStrip();
+            // 深浅主题：DarkColorTable 的各属性实时读 Config.BG/Fg —— 主题切换后菜单自动跟上。
+            // 此前托盘菜单没挂渲染器，系统浅色下菜单白底，与整套深色 UI 割裂
+            trayMenu.ForeColor = Config.FG;
+            trayMenu.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
             var explorerItem = new ToolStripMenuItem(I18n.T("explorer_hover"));
             _trayExplorerItem = explorerItem;
             explorerItem.CheckOnClick = true;
@@ -644,11 +648,14 @@ namespace HoverExplorer
             Config.Save();
             _lastSysDark = Config.SystemDark;
             PopupForm.ClearUiIconCache();
+            if (TrayMenu != null) TrayMenu.ForeColor = Config.FG;   // 托盘菜单文字跟主题
             foreach (var p in _panels) p.RefreshPanel();
             foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyPalette(); }
             EntryListForm.NotifyChanged();
             if (_entryCardForm != null && !_entryCardForm.IsDisposed) _entryCardForm.Relayout();
         }
+
+        private static bool _lastGatePass = true;
 
         // "跟随系统"轮询状态（Tick 内 2s 节流一次注册表读取）
         private static DateTime _lastSysThemeAt = DateTime.UtcNow;
@@ -1156,6 +1163,13 @@ namespace HoverExplorer
             // 文件夹面板与文件预览各自一套门控：只拦各自功能，未拦的一方继续检测
             bool folderSup = Config.HoverSuppressed(false);
             bool previewSup = Config.HoverSuppressed(true);
+            // 门控状态翻转日志：诊断"时灵时不灵"——不灵的那一下看这里（放行/抑制）与 [hover] 目标
+            bool gatePass = !(folderSup && previewSup);
+            if (gatePass != _lastGatePass)
+            {
+                DebugLog("[gate] " + (gatePass ? "放行" : "抑制") + " @" + mx + "," + my);
+                _lastGatePass = gatePass;
+            }
             MaybeGateHint(mx, my);
             // 两套都拦住：跳过昂贵的悬停检测（hoverPath 保持 null），但不能提前 return——
             // 下方的关闭维护（预览 300ms 宽限关闭 + MaybeClose 面板衰减）必须照常跑，

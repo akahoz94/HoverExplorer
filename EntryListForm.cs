@@ -36,6 +36,17 @@ namespace HoverExplorer
         private Timer _dragSubTimer;      // 拖拽悬停文件夹 ~500ms → 弹簧式打开级联子列表
         private EntryRow _dragSubRow;
 
+        // ---- 标签栏（原型 A 分组标签，历史作为特殊分组）----
+        private int _curG = 0;                    // 当前分组索引；-1 = 历史分组
+        private int _lastFavG = 0;                // 上次选中的收藏分组（历史行点☆加入该组）
+        private bool _suppressEnter;              // 拖放后抑制一次 MouseEnter 重建
+        private const string DragFmtRow = "EntryRowDrag";   // 内部行拖动数据格式
+        private class RowDragData { public string Path; public int? FromG; public int? FromH; }
+        private int _listTop;   // 列表区顶部 y（拖放插入指示用）
+        private const int SideGap = 4;            // 左侧分组栏与右侧列表间距
+        private const int SideBarWMin = 72, SideBarWMax = 150;
+        private int _sideW = 90;                  // 左侧分组栏宽度
+
         protected override bool ShowWithoutActivation { get { return true; } }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -66,6 +77,8 @@ namespace HoverExplorer
                 Close();
             };
             _fnBuildHeader();
+            _curG = Config.FavoriteCurGroup;
+            _lastFavG = Math.Max(0, Math.Min(_curG, Config.FavoriteGroups.Count - 1));
             _fnBuildRows();
         }
 
@@ -136,29 +149,63 @@ namespace HoverExplorer
             if (_pinBtn != null) _pinBtn.Image = PreviewForm.PinIcon(_pinned);
         }
 
-        // ---- 行区：收藏分组 / 历史分组。配色跟随文件列表调色板（List* 系列）----
+        // ---- 行区：顶部标签栏（多分组 + 历史特殊分组）+ 当前分组列表 ----
+        private FavoriteGroup CurrentGroup()
+        {
+            if (Config.FavoriteGroups.Count == 0)
+                Config.FavoriteGroups.Add(new FavoriteGroup(I18n.T("fav_default_name"), "#4a7ab5"));
+            if (_curG < 0) return null;   // 历史分组
+            if (_curG >= Config.FavoriteGroups.Count) _curG = 0;
+            return Config.FavoriteGroups[_curG];
+        }
+
+        private static bool PathExists(string p) { return Directory.Exists(p) || File.Exists(p); }
+
+        // 按背景亮度返回黑/白文字（保证可读）
+        private static Color ContrastFg(Color bg)
+        {
+            return (bg.R * 0.299 + bg.G * 0.587 + bg.B * 0.114) > 140 ? Color.Black : Color.White;
+        }
+
+        // 按索引取收藏分组，越界回退到第一个
+        private FavoriteGroup _fnFavGroup(int idx)
+        {
+            if (Config.FavoriteGroups.Count == 0)
+                Config.FavoriteGroups.Add(new FavoriteGroup(I18n.T("fav_default_name"), "#4a7ab5"));
+            if (idx < 0 || idx >= Config.FavoriteGroups.Count) idx = 0;
+            return Config.FavoriteGroups[idx];
+        }
+
         private void _fnBuildRows()
         {
             foreach (var r in _rows) { try { Controls.Remove(r); r.Dispose(); } catch { } }
             _rows.Clear();
-            var fav = Config.FavoriteFolders.Where(Directory.Exists).ToList();
-            var recent = Config.RecentFolders.Where(p => Directory.Exists(p) && !fav.Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
+            var grp = CurrentGroup();
+            bool isHist = _curG < 0;
+            List<string> items;
+            if (isHist) items = Config.RecentFolders.Where(PathExists).ToList();
+            else items = grp.Items.Where(PathExists).ToList();
 
-            // 宽度：用户拖宽优先；否则按内容自适应（只量文件夹名，路径尾已移除）
-            if (Config.EntryListW >= 220) _listW = Config.EntryListW;
+            var nameFont = new Font(Config.FontName, Config.FontSize);
+            var tabFont = new Font(Config.FontName, Config.FontSize - 0.5f);
+
+            // 左侧分组栏：色块窄栏固定宽度
+            _sideW = 38;
+
+            // 总宽度：手动调整值优先；否则按右栏内容自适应
+            if (Config.EntryListW > 0) _listW = Config.EntryListW;
             else
             {
-                var nameFont = new Font(Config.FontName, Config.FontSize);
                 int w = 300;
                 using (var g = CreateGraphics())
                 {
-                    foreach (var p in fav.Concat(recent))
+                    foreach (var p in items)
                     {
                         var sw = g.MeasureString(Path.GetFileName(p), nameFont).Width;
                         if (sw + 64 > w) w = (int)sw + 64;
                     }
                 }
-                _listW = Math.Min(w, 520);
+                _listW = ListPadLr * 2 + _sideW + SideGap + Math.Min(w, 420);
             }
 
             BackColor = Config.ListCanvas;
@@ -166,29 +213,87 @@ namespace HoverExplorer
             var subFont = new Font(Config.FontName, Config.FontSize - 0.5f);
             int y = _headerH + 2;
             int zebra = 0;
-            y = _fnAddSection(y, I18n.T("sec_fav"));
-            if (fav.Count == 0 && recent.Count == 0)
+
+            // ---- 左侧分组栏 + 右侧列表区 ----
+            int rightX = ListPadLr + _sideW + SideGap;
+            int rightW = _listW - rightX - ListPadLr;
+            if (rightW < 120) rightW = 120;
+
+            // 左侧分组栏（纵向，历史置顶）
+            int sideBarH = _fnBuildSideBar(y, _sideW, font);
+
+            // ---- 右侧当前分组列表 ----
+            _listTop = y;
+            int contentH = Math.Max(26, items.Count * 26 + 4);
+            int listDropH = contentH;
+            if (Config.EntryListH > 0) listDropH = Math.Max(26, Config.EntryListH - y - ListPadBottom);
+            var listDrop = new Panel
+            {
+                Location = new Point(rightX, y),
+                Size = new Size(rightW, listDropH),
+                BackColor = Config.ListCanvas,
+            };
+            // 收藏分组空白区可接收行拖放（追加到末尾）；历史分组不接受
+            if (!isHist)
+            {
+                listDrop.AllowDrop = true;
+                listDrop.DragEnter += delegate(object s, DragEventArgs e)
+                {
+                    if (e.Data.GetDataPresent(DragFmtRow)) e.Effect = DragDropEffects.Move;
+                    else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                        e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                };
+                listDrop.DragOver += delegate(object s, DragEventArgs e)
+                {
+                    if (e.Data.GetDataPresent(DragFmtRow)) e.Effect = DragDropEffects.Move;
+                    else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                        e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                    else e.Effect = DragDropEffects.None;
+                };
+                listDrop.DragDrop += delegate(object s, DragEventArgs e)
+                {
+                    if (e.Data.GetDataPresent(DragFmtRow)) _fnDropRow(null, e);
+                    else
+                    {
+                        var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+                        if (files != null) _fnAddToCurrentGroup(files);
+                    }
+                };
+            }
+            Controls.Add(listDrop);
+            _rows.Add(listDrop);
+
+            if (items.Count == 0)
             {
                 var empty = new Label
                 {
-                    Text = I18n.T("entry_empty"),
-                    Location = new Point(ListPadLr + 4, y),
+                    Text = I18n.T(isHist ? "hist_empty" : "entry_empty"),
+                    Location = new Point(4, 4),
                     AutoSize = true,
                     ForeColor = Config.ListMu,
                     Font = subFont,
                     BackColor = Config.ListCanvas,
                 };
-                Controls.Add(empty);
-                _rows.Add(empty);
-                y += 26;
+                listDrop.Controls.Add(empty);
             }
-            foreach (var p in fav) y = _fnAddRow(y, p, true, font, subFont, zebra++);
-            if (recent.Count > 0) y = _fnAddSection(y, I18n.T("sec_recent"));
-            foreach (var p in recent) y = _fnAddRow(y, p, false, font, subFont, zebra++);
+            int ry = 0;
+            for (int idx = 0; idx < items.Count; idx++)
+            {
+                var p = items[idx];
+                EntryRow row;
+                if (isHist) row = _fnMakeHistRow(p, idx, font, subFont, zebra++);
+                else row = _fnMakeRow(p, true, font, subFont, zebra++);
+                row.Location = new Point(0, ry);
+                row.Size = new Size(listDrop.Width, 24);
+                listDrop.Controls.Add(row);
+                _rows.Add(row);
+                ry += 26;
+            }
+            y = listDrop.Bottom + 2;
 
-            _fullH = y + ListPadBottom;
-            // 表头容器与按钮位置同步新宽度：Panel 裁切溢出子控件，
-            // 只挪按钮不挪容器会把图钉/折叠裁没（长路径撑宽后按钮消失的根因）
+            // 高度：手动调整值优先；否则按内容自适应（取两侧最大值，空分组不裁侧边栏）
+            if (Config.EntryListH > 0) _fullH = Config.EntryListH;
+            else _fullH = Math.Max(y + ListPadBottom, _headerH + 2 + sideBarH + ListPadBottom);
             if (_headPanel != null)
             {
                 _headPanel.Size = new Size(_listW - ListPadLr * 2, _headerH);
@@ -205,31 +310,218 @@ namespace HoverExplorer
             ClientSize = new Size(_listW, _fullH);
         }
 
-        private int _fnAddSection(int y, string title)
+        // 外部文件拖入空白区 → 收藏到当前分组
+        private void _fnAddToCurrentGroup(string[] paths)
         {
-            var l = new Label
+            var grp = CurrentGroup();
+            if (grp == null) return;
+            foreach (var p in paths)
             {
-                Text = title,
-                Location = new Point(ListPadLr + 2, y),
-                Size = new Size(_listW - ListPadLr * 2 - 4, 16),
-                ForeColor = Config.ListMu,
-                Font = new Font(Config.FontName, Config.FontSize - 1f, FontStyle.Bold),
-                BackColor = Config.ListCanvas,
-            };
-            Controls.Add(l);
-            _rows.Add(l);
-            return y + 20;
+                if (!PathExists(p)) continue;
+                if (!grp.Items.Contains(p, StringComparer.OrdinalIgnoreCase)) grp.Items.Add(p);
+            }
+            _dirty = true; _fnSave(); _fnBuildRows();
         }
 
-        private int _fnAddRow(int y, string path, bool isFav, Font font, Font subFont, int zebra)
+        // 行点击打开：文件用默认程序，文件夹走 _onOpenFolder
+        private void _fnOpenPath(string path, Point pt)
+        {
+            if (File.Exists(path))
+            {
+                Program._entryArmed = false;
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+                catch (Exception ex) { Program.DebugLog("[entry] file open fail: " + ex.Message); }
+            }
+            else _onOpenFolder(path, pt);
+        }
+
+        // ---- 左侧色块窄栏（原型 S）：历史置顶、色块首字、悬停 tooltip、激活外圈、拖放移组 ----
+        private int _fnBuildSideBar(int top, int w, Font font)
+        {
+            var bar = new Panel { Location = new Point(ListPadLr, top), Size = new Size(w, 100), BackColor = Config.ListHdbg };
+            var chipFont = new Font(Config.FontName, Config.FontSize + 1f, FontStyle.Bold);
+            var iconFont = new Font(Config.FontName, Config.FontSize + 2f);
+            const int itemH = 36;
+            const int cs = 22;   // 色块尺寸
+            int iy = 0;
+
+            // 历史置顶（图标，悬停切换）
+            bool histOn = _curG < 0;
+            var histTab = new SideTab { Location = new Point(0, iy), Size = new Size(w, itemH), BackColor = histOn ? Config.ListHv : Config.ListHdbg, Cursor = Cursors.Hand };
+            histTab.Paint += delegate(object s, PaintEventArgs pe)
+            {
+                var g2 = pe.Graphics;
+                g2.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                var r = new Rectangle(0, 0, w, itemH);
+                TextRenderer.DrawText(g2, "🕘", iconFont, r, histOn ? Config.ListFg : Config.ListMu,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                if (histOn)
+                {
+                    var ac = Config.Accent;
+                    using (var p = new Pen(ac, 2)) g2.DrawRectangle(p, 1, 1, w - 2, itemH - 2);
+                }
+            };
+            histTab.MouseEnter += delegate { if (_suppressEnter) return; if (Control.MouseButtons != MouseButtons.None) return; if (_curG >= 0) { _curG = -1; _fnBuildRows(); } };
+            Tips.Set(histTab, I18n.T("hist_bar") + " · " + Config.RecentFolders.Count);
+            bar.Controls.Add(histTab);
+            iy += itemH;
+
+            // 收藏分组色块
+            for (int i = 0; i < Config.FavoriteGroups.Count; i++)
+            {
+                var g = Config.FavoriteGroups[i];
+                bool on = i == _curG;
+                var color = ColorTranslator.FromHtml(g.Color);
+                string first = g.Name.Length > 0 ? g.Name.Substring(0, 1) : "?";
+                int gi = i;
+                var tab = new SideTab { Location = new Point(0, iy), Size = new Size(w, itemH), BackColor = on ? Config.ListHv : Config.ListHdbg, Cursor = Cursors.Hand };
+                tab.Paint += delegate(object s, PaintEventArgs pe)
+                {
+                    var g2 = pe.Graphics;
+                    g2.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    int cx = (w - cs) / 2, cy = (itemH - cs) / 2;
+                    using (var b = new SolidBrush(color)) g2.FillRectangle(b, cx, cy, cs, cs);
+                    if (on)
+                    {
+                        using (var p = new Pen(Color.White, 2)) g2.DrawRectangle(p, cx, cy, cs, cs);
+                        using (var p = new Pen(color, 3)) g2.DrawRectangle(p, cx - 2, cy - 2, cs + 4, cs + 4);
+                    }
+                    TextRenderer.DrawText(g2, first, chipFont, new Rectangle(cx, cy, cs, cs), Color.White,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                };
+                tab.MouseEnter += delegate { if (_suppressEnter) return; if (Control.MouseButtons != MouseButtons.None) return; if (gi != _curG) { _curG = gi; _lastFavG = gi; Config.FavoriteCurGroup = gi; _fnBuildRows(); } };
+                tab.DoubleClick += delegate
+                {
+                    var nn = PromptDialog.Show(I18n.T("group_name"), g.Name);
+                    if (!string.IsNullOrEmpty(nn)) { g.Name = nn; _dirty = true; _fnSave(); _fnBuildRows(); }
+                };
+                tab.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Right) _fnTabMenu(gi); };
+                tab.AllowDrop = true;
+                tab.DragEnter += delegate(object s, DragEventArgs e) { if (e.Data.GetDataPresent(DragFmtRow)) e.Effect = DragDropEffects.Move; else if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
+                tab.DragOver += delegate(object s, DragEventArgs e) {
+                    if (e.Data.GetDataPresent(DragFmtRow)) e.Effect = DragDropEffects.Move;
+                    else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                    {
+                        e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                        if (gi != _curG) { _curG = gi; _lastFavG = gi; Config.FavoriteCurGroup = gi; BeginInvoke((Action)(() => _fnBuildRows())); }
+                    }
+                    else e.Effect = DragDropEffects.None;
+                };
+                tab.DragDrop += delegate(object s, DragEventArgs e) { _fnDropOnTab(gi, e); };
+                Tips.Set(tab, g.Name + " · " + g.Items.Count);
+                bar.Controls.Add(tab);
+                iy += itemH;
+            }
+
+            // ＋新建
+            var add = new SideTab { Location = new Point(0, iy), Size = new Size(w, 32), BackColor = Config.ListHdbg, Cursor = Cursors.Hand };
+            add.Paint += delegate(object s, PaintEventArgs pe)
+            {
+                TextRenderer.DrawText(pe.Graphics, "＋", iconFont, new Rectangle(0, 0, w, 32), Config.ListMu,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            };
+            add.MouseEnter += delegate { add.BackColor = Config.ListHv; add.Invalidate(); };
+            add.MouseLeave += delegate { add.BackColor = Config.ListHdbg; add.Invalidate(); };
+            add.Click += delegate
+            {
+                var colors = new[] { "#4a7ab5", "#d99a1c", "#c0587a", "#3a8a5a", "#7a5ac0", "#b55a3a" };
+                var c = colors[Config.FavoriteGroups.Count % colors.Length];
+                Config.FavoriteGroups.Add(new FavoriteGroup(I18n.T("add_group"), c));
+                _curG = Config.FavoriteGroups.Count - 1;
+                _lastFavG = _curG;
+                Config.FavoriteCurGroup = _curG;
+                _dirty = true; _fnSave(); _fnBuildRows();
+            };
+            Tips.Set(add, I18n.T("add_group"));
+            bar.Controls.Add(add);
+            iy += 32;
+
+            bar.Size = new Size(w, iy);
+            Controls.Add(bar);
+            _rows.Add(bar);
+            return iy;
+        }
+
+        // 拖放到标签 = 移入该分组（内部行拖放 / 外部文件拖放）
+        private void _fnDropOnTab(int targetGi, DragEventArgs e)
+        {
+            if (targetGi < 0 || targetGi >= Config.FavoriteGroups.Count) return;
+            var target = Config.FavoriteGroups[targetGi];
+            var rd = e.Data.GetData(DragFmtRow) as RowDragData;
+            if (rd != null && !string.IsNullOrEmpty(rd.Path))
+            {
+                if (rd.FromG.HasValue && rd.FromG.Value < Config.FavoriteGroups.Count)
+                {
+                    var src = Config.FavoriteGroups[rd.FromG.Value];
+                    src.Items.RemoveAll(p => string.Equals(p, rd.Path, StringComparison.OrdinalIgnoreCase));
+                }
+                else if (rd.FromH.HasValue)
+                {
+                    Config.RecentFolders.RemoveAll(p => string.Equals(p, rd.Path, StringComparison.OrdinalIgnoreCase));
+                }
+                if (!target.Items.Contains(rd.Path, StringComparer.OrdinalIgnoreCase))
+                    target.Items.Insert(0, rd.Path);
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+                if (files == null) return;
+                bool added = false;
+                foreach (var p in files)
+                {
+                    if (!PathExists(p)) continue;
+                    if (!target.Items.Contains(p, StringComparer.OrdinalIgnoreCase)) { target.Items.Add(p); added = true; }
+                }
+                if (!added) return;
+            }
+            else return;
+            _curG = targetGi; _lastFavG = targetGi; Config.FavoriteCurGroup = targetGi;
+            _dirty = true; _fnSave();
+            _suppressEnter = true;
+            _fnBuildRows();
+            var t = new Timer { Interval = 150 };
+            t.Tick += (s2, e2) => { _suppressEnter = false; t.Dispose(); };
+            t.Start();
+        }
+
+        private void _fnTabMenu(int gi)
+        {
+            var m = new ContextMenuStrip { ShowImageMargin = false, BackColor = Config.BG, ForeColor = Config.FG, Font = new Font(Config.FontName, Config.FontSize) };
+            m.Items.Add(I18n.T("rename"), null, (s, e) =>
+            {
+                var g = Config.FavoriteGroups[gi];
+                var nn = PromptDialog.Show(I18n.T("group_name"), g.Name);
+                if (!string.IsNullOrEmpty(nn)) { g.Name = nn; _dirty = true; _fnSave(); _fnBuildRows(); }
+            });
+            m.Items.Add(I18n.T("group_color"), null, (s, e) =>
+            {
+                var g = Config.FavoriteGroups[gi];
+                using (var cd = new ColorDialog { Color = ColorTranslator.FromHtml(g.Color) })
+                    if (cd.ShowDialog() == DialogResult.OK)
+                    {
+                        g.Color = "#" + cd.Color.R.ToString("x2") + cd.Color.G.ToString("x2") + cd.Color.B.ToString("x2");
+                        _dirty = true; _fnSave(); _fnBuildRows();
+                    }
+            });
+            if (Config.FavoriteGroups.Count > 1)
+                m.Items.Add(I18n.T("group_remove"), null, (s, e) =>
+                {
+                    Config.FavoriteGroups.RemoveAt(gi);
+                    if (_curG >= Config.FavoriteGroups.Count) _curG = Config.FavoriteGroups.Count - 1;
+                    Config.FavoriteCurGroup = _curG;
+                    _dirty = true; _fnSave(); _fnBuildRows();
+                });
+            m.Show(Cursor.Position);
+        }
+
+
+        private EntryRow _fnMakeRow(string path, bool isFav, Font font, Font subFont, int zebra)
         {
             var baseColor = zebra % 2 == 1 ? Config.ListZb : Config.ListBg;
             var row = new EntryRow
             {
                 Full = path,
                 IsFav = isFav,
-                Location = new Point(ListPadLr, y),
-                Size = new Size(_listW - ListPadLr * 2, 24),
                 Font = font,
                 BackColor = baseColor,
                 BaseColor = baseColor,
@@ -238,6 +530,7 @@ namespace HoverExplorer
                 Name = Path.GetFileName(path),
                 SubFont = subFont,
             };
+
             row.MouseEnter += delegate
             {
                 row.BackColor = Config.ListHv;
@@ -251,7 +544,6 @@ namespace HoverExplorer
             };
             row.StarHover += delegate(object s, bool inStar)
             {
-                // 星标上悬停不触发行级联子列表（400ms 弹出会盖住星标本意）
                 if (inStar) _fnStopRowHover();
                 else if (_rowHoverPath == path) _fnStartRowHover(row);
             };
@@ -259,20 +551,155 @@ namespace HoverExplorer
             row.MouseClick += delegate(object s, MouseEventArgs e)
             {
                 if (e.Button != MouseButtons.Left) return;
-                // 先取坐标：RecordRecent 重排会重建整表（当前行随之 Dispose），
-                // 事后再调 row.PointToScreen 会对已释放控件抛异常，被全局 ThreadException
-                // 吞掉 → Process.Start 根本不执行（"点击闪一下且打不开文件夹"的根因）
                 var pt = row.PointToScreen(Point.Empty);
                 RecordRecent(path);
-                _onOpenFolder(path, pt);
+                _fnOpenPath(path, pt);
                 Close();
             };
             row.MouseUp += delegate(object s, MouseEventArgs e)
             {
-                if (e.Button != MouseButtons.Right) return;
-                _fnRowMenu(row);
+                if (e.Button == MouseButtons.Right) _fnRowMenu(row);
             };
-            // 拖放目标：拖文件到行上 = 复制（默认）/移动（Shift），与文件列表行语义一致
+            // ---- 拖动源：行内排序 / 跨标签移组（左键移动超过阈值启动）----
+            row.MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left && !row.IsStarPoint(e.Location))
+                {
+                    _dragSrcPath = path;
+                    _dragSrcPt = e.Location;
+                    _dragSrcRow = row;
+                }
+                else { _dragSrcRow = null; }
+            };
+            row.MouseMove += delegate(object s, MouseEventArgs e)
+            {
+                if (_dragSrcRow != row || string.IsNullOrEmpty(_dragSrcPath)) return;
+                if (Math.Abs(e.X - _dragSrcPt.X) + Math.Abs(e.Y - _dragSrcPt.Y) < 4) return;
+                var idx = CurrentGroup().Items.IndexOf(path);
+                var data = new DataObject();
+                data.SetData(DragFmtRow, new RowDragData { Path = path, FromG = _curG, FromH = null });
+                _dragSrcRow = null;
+                try { row.DoDragDrop(data, DragDropEffects.Move); } catch { }
+            };
+            row.MouseUp += delegate { _dragSrcRow = null; };
+            // ---- 拖放目标：内部行插入排序 + 外部文件复制/移动 ----
+            row.AllowDrop = true;
+            row.DragEnter += delegate(object s, DragEventArgs e)
+            {
+                if (e.Data.GetDataPresent(DragFmtRow)) { e.Effect = DragDropEffects.Move; row.BackColor = Config.ListHv; _fnStopRowHover(); }
+                else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                {
+                    e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                    row.BackColor = Config.ListDrop;
+                    _fnStopRowHover();
+                }
+            };
+            row.DragOver += delegate(object s, DragEventArgs e)
+            {
+                if (e.Data.GetDataPresent(DragFmtRow)) e.Effect = DragDropEffects.Move;
+                else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                    e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
+                else e.Effect = DragDropEffects.None;
+                _fnScheduleDragSub(row);
+            };
+            row.DragLeave += delegate
+            {
+                _fnCancelDragSub(row);
+                if (!_fnRowContains(row)) row.BackColor = row.BaseColor;
+            };
+            row.DragDrop += delegate(object s, DragEventArgs e)
+            {
+                _fnCancelDragSub();
+                row.BackColor = row.BaseColor;
+                if (e.Data.GetDataPresent(DragFmtRow)) { _fnDropRow(row, e); return; }
+                var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+                if (files != null && Directory.Exists(path)) Program.DropFilesIntoEntryFolder(path, files, (e.KeyState & 4) != 0);
+            };
+            row.BtnHover += delegate(object s, bool inBtn)
+            {
+                if (inBtn) _fnStopRowHover();
+                else if (_rowHoverPath == path) _fnStartRowHover(row);
+            };
+            row.CopyClicked += delegate { try { Clipboard.SetText(path); _fnToast(I18n.T("copied")); } catch { } };
+            row.PinClicked += delegate { Program.TogglePin(path); };
+            row.RenameClicked += delegate { _fnBeginEntryRename(row); };
+            return row;
+        }
+
+        // ---- 历史抽屉行：☆ 收藏（加入当前分组）、拖进分组 ----
+        private EntryRow _fnMakeHistRow(string path, int histIdx, Font font, Font subFont, int zebra)
+        {
+            var baseColor = zebra % 2 == 1 ? Config.ListZb : Config.ListBg;
+            var row = new EntryRow
+            {
+                Full = path,
+                IsFav = false,
+                Font = font,
+                BackColor = baseColor,
+                BaseColor = baseColor,
+                ForeColor = Config.ListFg,
+                Cursor = Cursors.Hand,
+                Name = Path.GetFileName(path),
+                SubFont = subFont,
+            };
+            row.MouseClick += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button != MouseButtons.Left) return;
+                var pt = row.PointToScreen(Point.Empty);
+                RecordRecent(path);
+                _fnOpenPath(path, pt);
+                Close();
+            };
+            row.StarToggled += delegate
+            {
+                // ☆ → 加入上次选中的收藏分组
+                var grp = _fnFavGroup(_lastFavG);
+                if (!grp.Items.Contains(path, StringComparer.OrdinalIgnoreCase)) grp.Items.Insert(0, path);
+                _dirty = true; _fnSave(); _fnBuildRows();
+            };
+            // 拖动源：拖到分组列表/标签 = 移入收藏
+            row.MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left && !row.IsStarPoint(e.Location))
+                {
+                    _dragSrcPath = path;
+                    _dragSrcPt = e.Location;
+                    _dragSrcRow = row;
+                }
+                else _dragSrcRow = null;
+            };
+            row.MouseMove += delegate(object s, MouseEventArgs e)
+            {
+                if (_dragSrcRow != row || string.IsNullOrEmpty(_dragSrcPath)) return;
+                if (Math.Abs(e.X - _dragSrcPt.X) + Math.Abs(e.Y - _dragSrcPt.Y) < 4) return;
+                var data = new DataObject();
+                data.SetData(DragFmtRow, new RowDragData { Path = path, FromG = null, FromH = histIdx });
+                _dragSrcRow = null;
+                try { row.DoDragDrop(data, DragDropEffects.Move); } catch { }
+            };
+            row.MouseUp += delegate { _dragSrcRow = null; };
+            // ---- 悬停级联子列表（与收藏行同语义）----
+            row.MouseEnter += delegate
+            {
+                row.BackColor = Config.ListHv;
+                _rowHoverPath = path;
+                _fnStartRowHover(row);
+            };
+            row.MouseLeave += delegate
+            {
+                if (!_fnRowContains(row)) row.BackColor = row.BaseColor;
+                if (_rowHoverPath == path) { _rowHoverPath = null; _fnStopRowHover(); }
+            };
+            row.StarHover += delegate(object s, bool inStar)
+            {
+                if (inStar) _fnStopRowHover();
+                else if (_rowHoverPath == path) _fnStartRowHover(row);
+            };
+            row.MouseUp += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right) _fnRowMenu(row);
+            };
+            // ---- 拖放目标：外部文件拖到历史文件夹行 = 复制/移动 ----
             row.AllowDrop = true;
             row.DragEnter += delegate(object s, DragEventArgs e)
             {
@@ -280,7 +707,6 @@ namespace HoverExplorer
                 {
                     e.Effect = (e.KeyState & 4) != 0 ? DragDropEffects.Move : DragDropEffects.Copy;
                     row.BackColor = Config.ListDrop;
-                    // 拖到行上瞬间停掉残留的行悬停级联调度，避免子列表弹在拖拽路径上
                     _fnStopRowHover();
                 }
             };
@@ -301,37 +727,70 @@ namespace HoverExplorer
                 _fnCancelDragSub();
                 row.BackColor = row.BaseColor;
                 var files = e.Data.GetData(DataFormats.FileDrop) as string[];
-                Program.DropFilesIntoEntryFolder(path, files, (e.KeyState & 4) != 0);
+                if (files != null && Directory.Exists(path)) Program.DropFilesIntoEntryFolder(path, files, (e.KeyState & 4) != 0);
             };
-            // ---- 行悬停操作按钮（与文件列表行一致，无删除）：重命名 · 复制路径 · 固定为桌面卡片 ----
+            // ---- 行悬停操作按钮 ----
             row.BtnHover += delegate(object s, bool inBtn)
             {
-                // 按钮上悬停不触发行级联子列表（与星标同语义：弹出会盖住按钮本意）
                 if (inBtn) _fnStopRowHover();
                 else if (_rowHoverPath == path) _fnStartRowHover(row);
             };
-            row.CopyClicked += delegate
-            {
-                try { Clipboard.SetText(path); _fnToast(I18n.T("copied")); } catch { }
-            };
+            row.CopyClicked += delegate { try { Clipboard.SetText(path); _fnToast(I18n.T("copied")); } catch { } };
             row.PinClicked += delegate { Program.TogglePin(path); };
             row.RenameClicked += delegate { _fnBeginEntryRename(row); };
-            Controls.Add(row);
-            _rows.Add(row);
-            return y + 26;
+            return row;
         }
 
-        // 星标点击：历史行点亮 → 移入收藏区顶部；收藏行熄灭 → 移回历史顶部（不在历史则补进去，行不消失）
+        // 拖放落点处理：row=null 落在空白列表区（追加到末尾）；row=具体行（插入到该行位置）
+        private void _fnDropRow(EntryRow targetRow, DragEventArgs e)
+        {
+            var rd = e.Data.GetData(DragFmtRow) as RowDragData;
+            if (rd == null || string.IsNullOrEmpty(rd.Path)) return;
+            var grp = CurrentGroup();
+            // 从来源移除
+            if (rd.FromG.HasValue && rd.FromG.Value < Config.FavoriteGroups.Count)
+            {
+                var src = Config.FavoriteGroups[rd.FromG.Value];
+                src.Items.RemoveAll(p => string.Equals(p, rd.Path, StringComparison.OrdinalIgnoreCase));
+            }
+            else if (rd.FromH.HasValue)
+            {
+                Config.RecentFolders.RemoveAll(p => string.Equals(p, rd.Path, StringComparison.OrdinalIgnoreCase));
+            }
+            // 插入目标位置
+            int ti = grp.Items.Count;
+            if (targetRow != null)
+            {
+                ti = grp.Items.IndexOf(targetRow.Full);
+                if (ti < 0) ti = grp.Items.Count;
+            }
+            if (!grp.Items.Contains(rd.Path, StringComparer.OrdinalIgnoreCase))
+                grp.Items.Insert(ti, rd.Path);
+            _curG = Config.FavoriteGroups.IndexOf(grp);
+            Config.FavoriteCurGroup = _curG;
+            _dirty = true; _fnSave(); _fnBuildRows();
+        }
+
+        private string _dragSrcPath;
+        private Point _dragSrcPt;
+        private EntryRow _dragSrcRow;
+
+        // 星标点击：收藏行熄灭 → 从当前分组移除并移回历史顶部
         private void _fnToggleFav(EntryRow row)
         {
             if (row.IsFav)
             {
-                Config.FavoriteFolders.RemoveAll(p => string.Equals(p, row.Full, StringComparison.OrdinalIgnoreCase));
+                var grp = CurrentGroup() ?? _fnFavGroup(_lastFavG);
+                grp.Items.RemoveAll(p => string.Equals(p, row.Full, StringComparison.OrdinalIgnoreCase));
                 if (!Config.RecentFolders.Contains(row.Full, StringComparer.OrdinalIgnoreCase))
                     Config.RecentFolders.Insert(0, row.Full);
             }
             else
-                Config.FavoriteFolders.Insert(0, row.Full);
+            {
+                var grp = CurrentGroup() ?? _fnFavGroup(_lastFavG);
+                if (!grp.Items.Contains(row.Full, StringComparer.OrdinalIgnoreCase))
+                    grp.Items.Insert(0, row.Full);
+            }
             _dirty = true;
             _fnSave();
             _fnBuildRows();
@@ -343,13 +802,15 @@ namespace HoverExplorer
             if (!row.IsFav)
                 m.Items.Add(I18n.T("add_fav"), null, (s, e) =>
                 {
-                    Config.FavoriteFolders.Insert(0, row.Full);
+                    var grp = _fnFavGroup(_lastFavG);
+                    if (!grp.Items.Contains(row.Full, StringComparer.OrdinalIgnoreCase)) grp.Items.Insert(0, row.Full);
                     _dirty = true; _fnSave(); _fnBuildRows();
                 });
             else
                 m.Items.Add(I18n.T("fav_remove"), null, (s, e) =>
                 {
-                    Config.FavoriteFolders.RemoveAll(p => string.Equals(p, row.Full, StringComparison.OrdinalIgnoreCase));
+                    var grp = CurrentGroup() ?? _fnFavGroup(_lastFavG);
+                    grp.Items.RemoveAll(p => string.Equals(p, row.Full, StringComparison.OrdinalIgnoreCase));
                     _dirty = true; _fnSave(); _fnBuildRows();
                 });
             if (!row.IsFav)
@@ -417,13 +878,25 @@ namespace HoverExplorer
             if (!commit || row == null || row.IsDisposed) return;
             string full = row.Full;
             if (string.IsNullOrEmpty(nn) || string.Equals(nn, Path.GetFileName(full), StringComparison.Ordinal)) return;
-            // RenamePath：校验非法字符/重名 + Directory.Move + 同步固定卡片路径 + 刷新相关面板
-            if (PopupForm.RenamePath(full, nn))
+            bool ok = false;
+            string newPath = Path.Combine(Path.GetDirectoryName(full), nn);
+            if (File.Exists(full))
             {
-                string newPath = Path.Combine(Path.GetDirectoryName(full), nn);
-                // 收藏/历史存的是完整路径：旧路径全部替换（RenamePath 只同步 PinnedItems）
-                for (int i = 0; i < Config.FavoriteFolders.Count; i++)
-                    if (string.Equals(Config.FavoriteFolders[i], full, StringComparison.OrdinalIgnoreCase)) Config.FavoriteFolders[i] = newPath;
+                // 文件重命名
+                try { File.Move(full, newPath); ok = true; }
+                catch (Exception ex) { Program.DebugLog("[entry] file rename fail: " + ex.Message); }
+            }
+            else
+            {
+                // RenamePath：校验非法字符/重名 + Directory.Move + 同步固定卡片路径 + 刷新相关面板
+                ok = PopupForm.RenamePath(full, nn);
+            }
+            if (ok)
+            {
+                // 收藏/历史存的是完整路径：遍历所有分组 + 历史，旧路径全部替换
+                foreach (var g in Config.FavoriteGroups)
+                    for (int i = 0; i < g.Items.Count; i++)
+                        if (string.Equals(g.Items[i], full, StringComparison.OrdinalIgnoreCase)) g.Items[i] = newPath;
                 for (int i = 0; i < Config.RecentFolders.Count; i++)
                     if (string.Equals(Config.RecentFolders[i], full, StringComparison.OrdinalIgnoreCase)) Config.RecentFolders[i] = newPath;
                 Config.Save();
@@ -454,6 +927,13 @@ namespace HoverExplorer
         }
 
         private bool _fnRowContains(Control c)
+        {
+            var pt = c.PointToClient(Cursor.Position);
+            return pt.X >= 0 && pt.X < c.Width && pt.Y >= 0 && pt.Y < c.Height;
+        }
+
+        // 光标是否在控件屏幕范围内（含子控件，避免 MouseLeave 进入子控件误判）
+        private bool _fnContainsCursor(Control c)
         {
             var pt = c.PointToClient(Cursor.Position);
             return pt.X >= 0 && pt.X < c.Width && pt.Y >= 0 && pt.Y < c.Height;
@@ -558,18 +1038,21 @@ namespace HoverExplorer
             {
                 var lp = m.LParam.ToInt64();
                 var cp = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
-                if (cp.X >= ClientSize.Width - 6 && cp.Y >= 0 && cp.Y < ClientSize.Height)
-                {
-                    m.Result = (IntPtr)11;   // HTRIGHT
-                    return;
-                }
+                int cw = ClientSize.Width, ch = ClientSize.Height;
+                // 右下角
+                if (cp.X >= cw - 6 && cp.Y >= ch - 6) { m.Result = (IntPtr)17; return; }
+                // 右缘拖宽
+                if (cp.X >= cw - 6 && cp.Y >= 0 && cp.Y < ch) { m.Result = (IntPtr)11; return; }
+                // 底缘拖高
+                if (cp.Y >= ch - 6 && cp.X >= 0 && cp.X < cw) { m.Result = (IntPtr)12; return; }
             }
             else if (m.Msg == 0x232)   // WM_EXITSIZEMOVE
             {
-                int w = ClientSize.Width;
-                if (w >= 220 && w != _listW)
+                int w = ClientSize.Width, h = ClientSize.Height;
+                if (w != _listW || h != _fullH)
                 {
                     Config.EntryListW = w;
+                    Config.EntryListH = h;
                     _dirty = true;
                     _fnBuildRows();
                 }
@@ -637,7 +1120,7 @@ namespace HoverExplorer
         // 真正访问（点击行打开）仍走 reorder=true 置顶
         public static void RecordRecent(string path, bool reorder)
         {
-            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            if (string.IsNullOrEmpty(path) || !PathExists(path)) return;
             bool exists = Config.RecentFolders.Contains(path, StringComparer.OrdinalIgnoreCase);
             if (exists && !reorder) return;
             // 已在顶部且未超上限 = 完全无变化：不写盘不重建。此前点击行会经历两次
@@ -652,7 +1135,9 @@ namespace HoverExplorer
             if (Config.RecentFolders.Count > Config.EntryRecentMax)
                 Config.RecentFolders.RemoveRange(Config.EntryRecentMax, Config.RecentFolders.Count - Config.EntryRecentMax);
             Config.Save();
-            NotifyChanged();   // 开着的收藏·历史列表实时刷新
+            // 仅当前正显示历史分组时才重建（收藏分组显示时，历史变更无需立即刷新，
+            // 避免子列表悬停级联 OpenSub→RecordRecent 连续重建导致列表闪烁）
+            if (_current != null && !_current.IsDisposed && _current._curG < 0) NotifyChanged();
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -660,6 +1145,7 @@ namespace HoverExplorer
             if (_watchTimer != null) { _watchTimer.Stop(); _watchTimer.Dispose(); _watchTimer = null; }
             if (_rowHoverTimer != null) { _rowHoverTimer.Stop(); _rowHoverTimer.Dispose(); _rowHoverTimer = null; }
             if (_dragSubTimer != null) { _dragSubTimer.Stop(); _dragSubTimer.Dispose(); _dragSubTimer = null; _dragSubRow = null; }
+
             if (_rowEdit != null) { try { _rowEdit.Dispose(); } catch { } _rowEdit = null; _rowEditRow = null; }
             if (_current == this) _current = null;
             base.OnFormClosed(e);
@@ -886,6 +1372,7 @@ namespace HoverExplorer
         }
 
         private Rectangle StarRect { get { return new Rectangle(24, 0, 20, Height); } }
+        public bool IsStarPoint(Point p) { return StarRect.Contains(p); }
 
         protected override void OnResize(EventArgs e)
         {
@@ -954,7 +1441,7 @@ namespace HoverExplorer
         {
             var g = e.Graphics;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            var icon = PopupForm.GetEntryIcon();
+            var icon = PopupForm.GetEntryIconFor(Full);
             if (icon != null) g.DrawImage(icon, 6, (Height - icon.Height) / 2);
             // 星标：收藏=实心金（与桌面卡片★徽章同色），历史=描边弱化；悬停提亮
             var sf = SubFont ?? Font;
@@ -1099,6 +1586,41 @@ namespace HoverExplorer
                 var sz2 = e.Graphics.MeasureString(tip, f);
                 e.Graphics.DrawString(tip, f, b, (Width - sz2.Width) / 2, Height / 2 - sz2.Height);
             }
+        }
+    }
+
+    // 双缓冲 Panel（侧栏色块自绘用，避免闪烁）
+    internal class SideTab : Panel
+    {
+        public SideTab() { DoubleBuffered = true; }
+    }
+
+    // 简易输入对话框（分组改名用，替代缺失的 InputBox）
+    internal class PromptDialog : Form
+    {
+        private readonly TextBox _tb;
+        public static string Show(string title, string initial)
+        {
+            using (var d = new PromptDialog(title, initial))
+            {
+                return d.ShowDialog() == DialogResult.OK ? d._tb.Text.Trim() : null;
+            }
+        }
+        private PromptDialog(string title, string initial)
+        {
+            Text = title;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            TopMost = true;
+            ClientSize = new Size(280, 80);
+            MaximizeBox = false; MinimizeBox = false;
+            BackColor = Config.BG; ForeColor = Config.FG;
+            var lbl = new Label { Text = title, Location = new Point(12, 10), AutoSize = true, ForeColor = Config.FG };
+            _tb = new TextBox { Text = initial, Location = new Point(12, 30), Size = new Size(256, 24) };
+            var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(120, 52), Size = new Size(70, 24) };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(198, 52), Size = new Size(70, 24) };
+            Controls.AddRange(new Control[] { lbl, _tb, ok, cancel });
+            AcceptButton = ok; CancelButton = cancel;
         }
     }
 }

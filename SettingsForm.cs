@@ -50,6 +50,7 @@ namespace HoverExplorer
         private ToggleSwitch _pvArchiveToggle;
         private ToggleSwitch _pvFontToggle;
         private ToggleSwitch _pvOtherToggle;
+        private ToggleSwitch _pvSpeedToggle;
         private TextBox _ffmpegPathBox;
         private Label _ffmpegStatusLbl;
         private HotkeyPill _hoverPill;
@@ -350,7 +351,12 @@ namespace HoverExplorer
 
             // ==== 组：预览类型（逐类开关，参考 QTTabBar 的"按类型预览"设置）====
             _pvTypeGroup = _fnNewGroup(I18n.T("group_preview_types"), false);
+            _pvTypeGroup.AddHeadLink("@成熟的剪辑猿", "https://b23.tv/hVdEGrA");
+            _pvTypeGroup.AddHeadLink("GitHub", "https://github.com/akahoz94");
             y = 8;
+            _pvSpeedToggle = new ToggleSwitch { On = Config.SpeedToggle };
+            _pvSpeedToggle.Toggled += (s, e) => { _fnApplySettings(false, false); };
+            y = _pvTypeGroup.AddRow(y, I18n.T("pv_type_speed"), null, _pvSpeedToggle);
             y = _pvTypeGroup.AddRow(y, I18n.T("pv_types_desc"), null, null);
 
             _pvImageToggle = new ToggleSwitch { On = Config.PreviewImage };
@@ -479,12 +485,18 @@ namespace HoverExplorer
             var hexBoxes = new TextBox[palKeys.Length];
             var colorBlocks = new Panel[palKeys.Length];
             Action applyNow = null;
+            // 测量标签最大宽度，色块/hex 留足间距，避免长语言文字覆盖色块
+            int lblMaxW = 0;
+            using (var lg = Graphics.FromHwnd(IntPtr.Zero)) using (var lf = new Font(Config.FontName, 9f))
+                foreach (var t in palLabels) lblMaxW = Math.Max(lblMaxW, (int)lg.MeasureString(t, lf).Width + 4);
+            int blockX = Math.Max(92, lblMaxW + 12);
+            int hexX = blockX + 30;
             for (int i = 0; i < palKeys.Length; i++)
             {
                 int ry = i * 24;
                 var lbl = new Label { Text = palLabels[i], Font = new Font(Config.FontName, 9f), ForeColor = Config.FG, Location = new Point(0, ry + 3), AutoSize = true };
-                var block = new Panel { Location = new Point(92, ry + 1), Size = new Size(24, 20), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
-                var hex = new TextBox { Location = new Point(122, ry), Size = new Size(100, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
+                var block = new Panel { Location = new Point(blockX, ry + 1), Size = new Size(24, 20), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
+                var hex = new TextBox { Location = new Point(hexX, ry), Size = new Size(100, 22), Font = new Font("Consolas", 9f), BorderStyle = BorderStyle.FixedSingle };
                 editorPanel.Controls.Add(lbl); editorPanel.Controls.Add(block); editorPanel.Controls.Add(hex);
                 hexBoxes[i] = hex; colorBlocks[i] = block;
                 int idx = i;
@@ -841,6 +853,7 @@ namespace HoverExplorer
             _entryGroup.Controls.Add(_areaClearBtn);
             _entryGroup.Controls.Add(_areaColorBlock);
             _entryGroup.ExpandRow(areaRowY, Math.Max(RowH, 19 + _areaLbl.PreferredHeight + 8));
+
             _entryGroup.FinishRows();
 
 
@@ -914,6 +927,7 @@ namespace HoverExplorer
             var link1 = MakeLink("GitHub Releases", linkX, aboutBase + 28, "https://github.com/dlsdgj/HoverExplorer/releases"); link1.Visible = false; aboutGroup.Controls.Add(link1);
             var link2 = MakeLink("百度网盘 (pwd: hbf8)", linkX, aboutBase + 52, "https://pan.baidu.com/s/12rp6LTe7Y8oSErvP8wTLgA?pwd=hbf8"); link2.Visible = false; aboutGroup.Controls.Add(link2);
             var linkCardGen = MakeLink(I18n.T("card_gen_link"), linkX, aboutBase + 76, "https://dlsdgj.github.io/hoverexplorer-card-palette/"); linkCardGen.Visible = false; aboutGroup.Controls.Add(linkCardGen);
+            var linkListGen = MakeLink(I18n.T("list_gen_link"), linkX, aboutBase + 100, "https://dlsdgj.github.io/hoverExplorers-cheme-generator/"); linkListGen.Visible = false; aboutGroup.Controls.Add(linkListGen);
             _verLbl = new Label { Text = "v" + Program.Version, AutoSize = true, ForeColor = Config.PlaceholderFg, Font = new Font(Config.FontName, 8f), Tag = "sub", Visible = false };
             _verLbl.Location = new Point(aboutGroup.Width - PadX - 18 - _verLbl.PreferredWidth, aboutBase + qrSize - _verLbl.PreferredHeight);
             aboutGroup.Controls.Add(_verLbl);
@@ -980,7 +994,30 @@ namespace HoverExplorer
             };
             wdBody.Height = Math.Max(60, (int)Math.Ceiling((double)TextRenderer.MeasureText(wdBody.Text, wdBody.Font, wdBody.Size, TextFormatFlags.WordBreak).Height / 12.0) * 12 + 4);
             aboutGroup.Controls.Add(wdBody);
-            aboutGroup.ExpandRow(wdBody.Bottom + 20 - AccGroup.HeadH, 0);
+            // 隐藏能力说明
+            int hfY = wdBody.Bottom + 18;
+            var hfTitle = new Label { Text = I18n.T("hidden_features_title"), Location = new Point(PadX, hfY), AutoSize = true, Font = new Font(Config.FontName, 8.5f, FontStyle.Bold), Tag = "sub", Visible = false };
+            aboutGroup.Controls.Add(hfTitle);
+            var hfBody = new Label
+            {
+                Text = I18n.T("hidden_features_body"),
+                Location = new Point(PadX, hfY + 20),
+                AutoSize = false,
+                Size = new Size(aboutGroup.Width - PadX * 2, 80),
+                ForeColor = Config.PlaceholderFg,
+                Font = new Font(Config.FontName, 8f),
+                Tag = "sub",
+                Visible = false
+            };
+            hfBody.Height = Math.Max(60, (int)Math.Ceiling((double)TextRenderer.MeasureText(hfBody.Text, hfBody.Font, hfBody.Size, TextFormatFlags.WordBreak).Height / 12.0) * 12 + 4);
+            aboutGroup.Controls.Add(hfBody);
+            var obsidianLink = MakeLink(I18n.T("hidden_features_obsidian_link"), PadX, hfBody.Bottom + 8, "https://github.com/dlsdgj/hover-link-preview");
+            obsidianLink.Visible = false;
+            aboutGroup.Controls.Add(obsidianLink);
+            var perchLink = MakeLink(I18n.T("hidden_features_perch_link"), PadX, obsidianLink.Bottom + 6, "https://github.com/dlsdgj/perch");
+            perchLink.Visible = false;
+            aboutGroup.Controls.Add(perchLink);
+            aboutGroup.ExpandRow(perchLink.Bottom + 20 - AccGroup.HeadH, 0);
             aboutGroup.FinishRows();
             if (aboutGroup.Open) { aboutGroup.Open = false; aboutGroup.Open = true; }
 
@@ -1327,6 +1364,7 @@ namespace HoverExplorer
             if (_pvArchiveToggle != null) Config.PreviewArchive = _pvArchiveToggle.On;
             if (_pvFontToggle != null) Config.PreviewFont = _pvFontToggle.On;
             if (_pvOtherToggle != null) Config.PreviewOther = _pvOtherToggle.On;
+            if (_pvSpeedToggle != null) Config.SpeedToggle = _pvSpeedToggle.On;
             if (_ffmpegPathBox != null)
             {
                 string fp = (_ffmpegPathBox.Text ?? "").Trim();
@@ -1538,6 +1576,30 @@ namespace HoverExplorer
                 PlaceChips();
                 _fnSyncChips();
                 return c;
+            }
+
+            public LinkLabel AddHeadLink(string text, string url)
+            {
+                var link = new LinkLabel
+                {
+                    Text = text,
+                    AutoSize = true,
+                    Font = new Font(Config.FontName, 8.5f),
+                    LinkArea = new LinkArea(0, text.Length),
+                    Cursor = Cursors.Hand,
+                    BackColor = Config.BgHover
+                };
+                link.LinkColor = Config.Accent;
+                link.VisitedLinkColor = Config.Accent;
+                link.Click += (s, e) => { try { System.Diagnostics.Process.Start(url); } catch { } };
+                int titleTextW = TextRenderer.MeasureText(_title.Text, _title.Font).Width + 4;
+                _title.Width = Math.Min(_title.Width, titleTextW);
+                int lx = _title.Right + 8;
+                foreach (Control c in _head.Controls)
+                    if (c is LinkLabel) lx = Math.Max(lx, c.Right + 8);
+                link.Location = new Point(lx, (HeadH - link.PreferredHeight) / 2);
+                _head.Controls.Add(link);
+                return link;
             }
 
             public void SetChip(int idx, string text)

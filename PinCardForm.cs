@@ -97,27 +97,16 @@ namespace HoverExplorer
             }
 
             // ----- 布局：宽度恒定 = 名字 + 徽章 + 右 padding（悬停不改变宽度） -----
-            int nameW, subW, extW;
-            using (var g = CreateGraphics())
-            {
-
-                nameW = Math.Min(TextRenderer.MeasureText(_name, _nameFont).Width + 2, 260);
-                subW = TextRenderer.MeasureText(_sub, _subFont).Width + 2;
-                extW = TextRenderer.MeasureText(_ext, _badgeFont, new Size(200, 20), TextFormatFlags.NoPadding).Width + 8;
-            }
-            int x = _isToday ? 21 : 14;
-            _nameRect = new Rectangle(x, 4, nameW, 16);
-            _badgeRect = new Rectangle(x + nameW + 5, 3, extW, 18);   // 徽标比卡片矮(18/24)，上下留 3px 更像标签
-            _subRect = new Rectangle(_badgeRect.Right + 5, 5, Math.Max(subW, 30), 13);
-            Width = _badgeRect.Right + 8 + ShadowPad;
+            _fnLayout();
 
             // ----- 事件（全自绘命中测试）-----
             MouseDown += (s, e) =>
             {
                 if (e.Button == MouseButtons.Left)
                 {
+                    _dragStart = Cursor.Position; _formStart = Location; _moved = false;
                     if (_badgeRect.Contains(e.Location)) _badgeDown = true;
-                    else { _dragStart = Cursor.Position; _formStart = Location; _moved = false; Capture = true; }
+                    else Capture = true;
                 }
                 if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right) ReleaseStuckDrag();
                 if (e.Button == MouseButtons.Middle) Program.Unpin(_item.Kind, _item.Path);
@@ -139,7 +128,8 @@ namespace HoverExplorer
                     else if (_badgeTimer != null) _badgeTimer.Stop();
                 }
                 Cursor = inBadge ? Cursors.Hand : Cursors.Default;
-                // 拖动
+                // 拖动（点徽标期间不拖动，避免执行文件时残留基准导致移位）
+                if (_badgeDown) return;
                 if (e.Button != MouseButtons.Left) return;
                 if (!_moved)
                 {
@@ -271,7 +261,36 @@ namespace HoverExplorer
             _nameFont = new Font(_pal.FontName, _pal.FontSize);
             _subFont = new Font(_pal.FontName, _pal.FontSize - 1f);
             _badgeFont = new Font(_pal.FontName, _pal.FontSize - 1f, FontStyle.Bold);
+            _fnLayout();
             _fnRender();
+        }
+
+        // 布局重算：配色切换后字体/字号变了，必须重测文字宽高并重算矩形，否则大字号方案文字被挤压
+        private void _fnLayout()
+        {
+            if (_name == null) return;  // 内容未就绪（构造函数首次调 _fnApplyPaletteColors 时跳过）
+            int nameW, subW, extW;
+            using (var g = CreateGraphics())
+            {
+                nameW = Math.Min(TextRenderer.MeasureText(_name, _nameFont).Width + 2, 260);
+                subW = TextRenderer.MeasureText(_sub, _subFont).Width + 2;
+                extW = TextRenderer.MeasureText(_ext, _badgeFont, new Size(200, 20), TextFormatFlags.NoPadding).Width + 8;
+            }
+            int x = _isToday ? 21 : 14;
+            int nameH = (int)Math.Ceiling(_nameFont.GetHeight()) + 2;
+            int badgeH = nameH + 2;
+            int subH = Math.Max(13, nameH - 2);
+            // 内容区域高度：上下各留 4px padding，至少 24px
+            int cardH = Math.Max(24, badgeH + 8);
+            _targetH = cardH + ShadowPad;
+            Height = _targetH;
+            int nameY = (cardH - nameH) / 2;
+            int badgeY = (cardH - badgeH) / 2;
+            int subY = (cardH - subH) / 2;
+            _nameRect = new Rectangle(x, nameY, nameW, nameH);
+            _badgeRect = new Rectangle(x + nameW + 5, badgeY, extW, badgeH);
+            _subRect = new Rectangle(_badgeRect.Right + 5, subY, Math.Max(subW, 30), subH);
+            Width = _badgeRect.Right + 8 + ShadowPad;
         }
 
         private static Color _fnLighten(Color c, float k)
@@ -305,7 +324,7 @@ namespace HoverExplorer
                 int right = Width - ShadowPad - 6;
                 if (right - left >= 24)
                 {
-                    _subRect = new Rectangle(left, 5, right - left, 13);
+                    _subRect = new Rectangle(left, _subRect.Y, right - left, _subRect.Height);
                     _subVisible = true;
                 }
                 else _subVisible = false;
@@ -614,12 +633,14 @@ namespace HoverExplorer
             }
         }
 
-        // 高度锁死 24px：AutoScale 在句柄创建/布局阶段会改写 bounds（实测 28→39），
-        // 在 SetBoundsCore 统一钳制。不能用 MaximumSize=(0,24)：0 宽分量被当真实上限，
+        private int _targetH = 24 + ShadowPad;   // 卡片目标高度（SetBoundsCore 钳制用，_fnLayout 更新）
+
+        // 高度按 _targetH 钳制：AutoScale 在句柄创建/布局阶段会改写 bounds（实测 28→39），
+        // 在 SetBoundsCore 统一钳制。不能用 MaximumSize=(0,H)：0 宽分量被当真实上限，
         // 宽度全被压到 MinimumSize.Width → 所有卡片同宽、徽章截断（实测踩坑）
         protected override void SetBoundsCore(int x, int y, int width, int height, BoundsSpecified specified)
         {
-            height = 24 + ShadowPad;
+            height = _targetH;
             base.SetBoundsCore(x, y, width, height, specified);
         }
 

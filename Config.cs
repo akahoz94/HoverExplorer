@@ -92,6 +92,8 @@ namespace HoverExplorer
         public static bool PreviewAudioCollapsed = true;
         // 收藏·历史列表宽度：0=按内容自适应；>0=用户拖宽后记忆
         public static int EntryListW = 0;
+        public static int EntryListH = 0;
+
         // 窗口边角风格：0=直角（锐利卡片风）1=圆角·粗描边（DWM 圆角 + 3px 自绘描边，默认）
         public static int WindowCorners = 1;
         // 自动尺寸（含"原图大小"）允许占用的最大屏幕比例，避免大图铺满整屏
@@ -123,6 +125,7 @@ namespace HoverExplorer
         public static bool PreviewArchive = true;
         public static bool PreviewFont = true;
         public static bool PreviewOther = true;
+        public static bool SpeedToggle = true;
         // ffmpeg 可执行文件路径（留空=自动探测）：用于解码 Media Foundation 解不了的
         // 高规格视频（10bit 4:2:2 / HEVC / 超高码率），以及作为解码兜底
         public static string FfmpegPath = "";
@@ -148,7 +151,10 @@ namespace HoverExplorer
         // 暂停触控区：独立框选矩形（设置方式复制触发区域那套），屏幕绝对坐标；W/H<20=未启用
         public static int PauseRectX = 0, PauseRectY = 0, PauseRectW = 0, PauseRectH = 0;
         // 收藏文件夹（用户手动）与最近打开（自动 MRU，上限 EntryRecentMax）
+        // FavoriteFolders 保留作旧格式兼容读取；新数据走 FavoriteGroups（多分组）
         public static List<string> FavoriteFolders = new List<string>();
+        public static List<FavoriteGroup> FavoriteGroups = new List<FavoriteGroup>();
+        public static int FavoriteCurGroup = 0;   // 当前选中分组索引
         public static List<string> RecentFolders = new List<string>();
         public static readonly int EntryRecentMax = 15;
         // 鼠标离开启用的面板/预览不自动关闭，点击其他位置才收起
@@ -385,6 +391,8 @@ namespace HoverExplorer
                         case "PreviewAudioH": PreviewAudioH = Convert.ToInt32(v); break;
                         case "PreviewAudioCollapsed": PreviewAudioCollapsed = Convert.ToBoolean(v); break;
                         case "EntryListW": EntryListW = Convert.ToInt32(v); break;
+                        case "EntryListH": EntryListH = Convert.ToInt32(v); break;
+
                         case "WindowCorners": WindowCorners = Convert.ToInt32(v); break;
                         case "EntryRectDelayMs": EntryRectDelayMs = Convert.ToInt32(v); break;
                         case "PreviewMaxRatio": PreviewMaxRatio = Convert.ToDouble(v); break;
@@ -405,6 +413,7 @@ namespace HoverExplorer
                         case "PreviewArchive": PreviewArchive = Convert.ToBoolean(v); break;
                         case "PreviewFont": PreviewFont = Convert.ToBoolean(v); break;
                         case "PreviewOther": PreviewOther = Convert.ToBoolean(v); break;
+                        case "SpeedToggle": SpeedToggle = Convert.ToBoolean(v); break;
                         case "FfmpegPath": FfmpegPath = Convert.ToString(v); break;
                         case "DebugLog": DebugLog = Convert.ToBoolean(v); break;
                         case "HideTooltip": HideTooltip = Convert.ToBoolean(v); break;
@@ -448,6 +457,25 @@ namespace HoverExplorer
                             FavoriteFolders = new List<string>();
                             foreach (var f in (System.Collections.ArrayList)v) FavoriteFolders.Add(Convert.ToString(f));
                             break;
+                        case "FavoriteCurGroup": FavoriteCurGroup = Convert.ToInt32(v); break;
+                        case "FavoriteGroups":
+                            FavoriteGroups = new List<FavoriteGroup>();
+                            foreach (var g in (System.Collections.ArrayList)v)
+                            {
+                                var gd = g as Dictionary<string, object>;
+                                if (gd == null) continue;
+                                var grp = new FavoriteGroup();
+                                if (gd.ContainsKey("Name")) grp.Name = Convert.ToString(gd["Name"]);
+                                if (gd.ContainsKey("Color")) grp.Color = Convert.ToString(gd["Color"]);
+                                if (gd.ContainsKey("Items"))
+                                {
+                                    var al = gd["Items"] as System.Collections.ArrayList;
+                                    if (al != null)
+                                        foreach (var it in al) grp.Items.Add(Convert.ToString(it));
+                                }
+                                FavoriteGroups.Add(grp);
+                            }
+                            break;
                         case "RecentFolders":
                             RecentFolders = new List<string>();
                             foreach (var f in (System.Collections.ArrayList)v) RecentFolders.Add(Convert.ToString(f));
@@ -463,6 +491,17 @@ namespace HoverExplorer
                         case "SortDesc": SortDesc = Convert.ToBoolean(v); break;
                     }
                 }
+                // 旧格式迁移：FavoriteFolders(扁平) → FavoriteGroups(多分组) 首组
+                if (FavoriteGroups.Count == 0)
+                {
+                    var first = new FavoriteGroup(I18n.T("fav_default_name"), "#4a7ab5");
+                    first.Items = new List<string>(FavoriteFolders);
+                    FavoriteGroups.Add(first);
+                }
+                // 兜底：至少一个分组
+                if (FavoriteGroups.Count == 0)
+                    FavoriteGroups.Add(new FavoriteGroup(I18n.T("fav_default_name"), "#4a7ab5"));
+                if (FavoriteCurGroup < -1 || FavoriteCurGroup >= FavoriteGroups.Count) FavoriteCurGroup = 0;
                 I18n.Lang = Language;
                 RefreshSortLabels();
                 ApplyTheme();
@@ -498,6 +537,7 @@ namespace HoverExplorer
                 data["PreviewArchive"] = PreviewArchive;
                 data["PreviewFont"] = PreviewFont;
                 data["PreviewOther"] = PreviewOther;
+                data["SpeedToggle"] = SpeedToggle;
                 data["FfmpegPath"] = FfmpegPath;
                 data["DebugLog"] = DebugLog;
                 data["HideTooltip"] = HideTooltip;
@@ -522,6 +562,13 @@ namespace HoverExplorer
                 data["PauseRectH"] = PauseRectH;
                 data["EntryRectColor"] = EntryRectColor;
                 data["FavoriteFolders"] = FavoriteFolders;
+                data["FavoriteCurGroup"] = FavoriteCurGroup;
+                {
+                    var gl = new List<Dictionary<string, object>>();
+                    foreach (var g in FavoriteGroups)
+                        gl.Add(new Dictionary<string, object> { { "Name", g.Name }, { "Color", g.Color }, { "Items", g.Items } });
+                    data["FavoriteGroups"] = gl;
+                }
                 data["RecentFolders"] = RecentFolders;
                 data["KeepOnLeave"] = KeepOnLeave;
                 data["RowSwapSides"] = RowSwapSides;
@@ -549,6 +596,8 @@ namespace HoverExplorer
                 data["PreviewAudioH"] = PreviewAudioH;
                 data["PreviewAudioCollapsed"] = PreviewAudioCollapsed;
                 data["EntryListW"] = EntryListW;
+                data["EntryListH"] = EntryListH;
+
                 data["WindowCorners"] = WindowCorners;
                 data["EntryRectDelayMs"] = EntryRectDelayMs;
                 data["PreviewMaxRatio"] = PreviewMaxRatio;
@@ -584,5 +633,15 @@ namespace HoverExplorer
         public int X;
         public int Y;
         public int Palette = -1;       // 该卡片自己的配色索引；-1 = 跟随默认（Config.CardPaletteIndex）
+    }
+
+    // 收藏分组：名称 + 色点 + 条目列表（原型 A 分组标签）
+    internal class FavoriteGroup
+    {
+        public string Name = "";
+        public string Color = "#4a7ab5";
+        public List<string> Items = new List<string>();
+        public FavoriteGroup() { }
+        public FavoriteGroup(string n, string c) { Name = n; Color = c; }
     }
 }

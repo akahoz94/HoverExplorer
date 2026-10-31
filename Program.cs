@@ -13,7 +13,7 @@ namespace HoverExplorer
 {
     internal static class Program
     {
-        public const string Version = "1.0.9";
+        public const string Version = "1.0.9.8";
 
         private static string _desktopPath;
         private static IntPtr _listview = IntPtr.Zero;
@@ -70,6 +70,7 @@ namespace HoverExplorer
         private static HotkeyWindow _hotkey;
         private static bool _hoverEnabled = true;
         private static bool _settingsOpen; // 设置窗口打开期间挂起面板自动关闭（面板可能是对话框属主）
+        private static SettingsForm _settingsForm;
         internal static bool _entryArmed = true;   // 收藏·历史触发区域/卡片悬停武装位：点击行打开 Explorer 后解除，鼠标离开后恢复
 
         // 开机自启：写 HKCU Run 键，无需安装
@@ -298,25 +299,36 @@ namespace HoverExplorer
 
             var settingsItem = new ToolStripMenuItem(I18n.T("settings"), null, (EventHandler)((s, e) =>
             {
-                if (_settingsOpen) return;   // 防重入（非模态：已开时忽略再次点击）
+                if (_settingsOpen && _settingsForm != null && !_settingsForm.IsDisposed)
+                {
+                    // 已打开：置顶激活（从托盘再次进入时把已有设置窗拉到前台）
+                    if (_settingsForm.WindowState == FormWindowState.Minimized) _settingsForm.WindowState = FormWindowState.Normal;
+                    _settingsForm.Show();
+                    _settingsForm.BringToFront();
+                    _settingsForm.Activate();
+                    return;
+                }
                 _settingsOpen = true;
-                var form = new SettingsForm();
-                form.FormClosed += (s2, e2) =>
+                _settingsForm = new SettingsForm();
+                _settingsForm.FormClosed += (s2, e2) =>
                 {
                     // 设置即改即生效：改动已随事件实时写入并保存，关闭无需提交
                     _settingsOpen = false;
+                    _settingsForm = null;
                 };
                 // 非模态：设置窗开着时仍可悬停操作列表/预览（Tick 不再被 _settingsOpen 短路）
-                form.Show();
+                _settingsForm.Show();
             }));
 
-            var langItem = new ToolStripMenuItem(I18n.T("language"));
+            int curLang = Array.IndexOf(I18n.LangCodes, Config.Language);
+            var langItem = new ToolStripMenuItem("Language" + (curLang >= 0 ? "  " + I18n.LangCodes[curLang] : ""));
             var addCardItem = new ToolStripMenuItem(I18n.T("card_from_clip"), null, (EventHandler)((s, e) => AddCardFromClipboard()));
+
             for (int i = 0; i < I18n.LangCodes.Length; i++)
             {
                 var code = I18n.LangCodes[i];
                 var name = I18n.LangNames[i];
-                var sub = new ToolStripMenuItem(name) { Checked = (code == Config.Language) };
+                var sub = new ToolStripMenuItem(code + "  " + name) { Checked = (code == Config.Language) };
                 sub.Click += (s, e) =>
                 {
                     Config.Language = code;
@@ -325,6 +337,7 @@ namespace HoverExplorer
                     Config.Save();
                     foreach (ToolStripMenuItem si in langItem.DropDownItems) si.Checked = false;
                     sub.Checked = true;
+                    langItem.Text = "Language  " + code;
                     explorerItem.Text = I18n.T("explorer_hover");
                     previewItem.Text = I18n.T("file_preview");
                     origItem.Text = I18n.T("preview_orig");
@@ -334,7 +347,7 @@ namespace HoverExplorer
                     autostartItem.Text = I18n.T("autostart");
                     hideTrayItem.Text = I18n.T("hide_tray");
 
-                    langItem.Text = I18n.T("language");
+                    langItem.Text = "Language  " + code;
                     themeItem.Text = I18n.T("theme");
                     themeDark.Text = I18n.T("theme_dark");
                     themeLight.Text = I18n.T("theme_light");
@@ -343,6 +356,16 @@ namespace HoverExplorer
                     addCardItem.Text = I18n.T("card_from_clip");
                     EntryListForm.NotifyChanged();   // 开着的收藏·历史列表文本/按钮提示换语言
                     if (_entryCardForm != null && !_entryCardForm.IsDisposed) _entryCardForm.Relayout();   // 重测宽度（长语言自适应）+ 重绘换语言
+                    if (_settingsOpen && _settingsForm != null && !_settingsForm.IsDisposed)
+                    {
+                        var sLoc = _settingsForm.Location;
+                        _settingsForm.Close();
+                        _settingsOpen = true;
+                        _settingsForm = new SettingsForm();
+                        _settingsForm.FormClosed += (s3, e3) => { _settingsOpen = false; _settingsForm = null; };
+                        try { _settingsForm.Location = sLoc; } catch { }
+                        _settingsForm.Show();
+                    }
                     refreshExitText();
                 };
                 langItem.DropDownItems.Add(sub);

@@ -488,47 +488,6 @@ namespace HoverExplorer
         }
     }
 
-    internal class SizeGripCtl : Control
-    {
-        private bool _hover;
-        // 列表窗=true：背景填状态栏同色。手柄叠在状态栏右端上，默认的“父级背景模拟”
-        // 会把窗体底色涂到状态栏右端上，形成一块突兀的白色控件
-        public bool MatchStatusbar;
-
-        public SizeGripCtl()
-        {
-            SetStyle(ControlStyles.SupportsTransparentBackColor
-                | ControlStyles.UserPaint
-                | ControlStyles.AllPaintingInWmPaint
-                | ControlStyles.OptimizedDoubleBuffer, true);
-            BackColor = Color.Transparent;
-        }
-
-        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
-
-        protected override void OnPaintBackground(PaintEventArgs e)
-        {
-            // 列表窗：像素级还原“没有手柄时”的样子——手柄(16×16)贴角，与状态栏重叠的内侧
-            // 10×10 填状态栏同色；压在右缘/底缘 6px padding 上的部分填窗体底色。
-            // 此前整块填状态栏色会在 padding 区多出一圈台阶色差
-            if (MatchStatusbar && Parent != null)
-            {
-                using (var b = new SolidBrush(Parent.BackColor))
-                    e.Graphics.FillRectangle(b, e.ClipRectangle);
-                using (var b = new SolidBrush(Config.ListHdbg))
-                    e.Graphics.FillRectangle(b, 0, 0, Math.Min(Width, 10), Math.Min(Height, 10));
-                return;
-            }
-            base.OnPaintBackground(e);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            // 不绘制任何提示线：缩放热区靠光标(SizeNWSE)+悬停提示表达，
-            // 浅色 L 线在深色背景、白色底块在浅色状态栏上都显得突兀
-        }
-    }
 
     // 音频操作栏：进度以浅色覆盖整条操作栏，底部 2px 实线更清晰。
     // 子控件（文件名/时间/频谱）背景透明，覆盖层才能透出来
@@ -588,7 +547,7 @@ namespace HoverExplorer
         public Action PasteAction;
         private Panel _scrollPanel;
         private Control _content;
-        private SizeGripCtl _grip;
+
         public string FilePath;
         public Action<string> OnFileSwitched;
         private Label _pinLaunchBtn;
@@ -598,9 +557,9 @@ namespace HoverExplorer
         // ===== 音频预览专用（操作栏：播放键+全量波形；悬停展开信息区：标题/时间/meta）=====
         internal IMediaSession _audio;
         private Label _audioPlayBtn;
-        private Label _audioSpdBtn;      // 倍速
+        private MediaPreview.SpeedRuler _audioRuler;   // 音频倍速刻度尺（展开时显示）
+        private Label _audioSpdHint;    // 右上角速度提示浮层
         private Label _audioCloseBtn;    // 关闭预览窗
-        private int _audioSpdIdx = 2;    // SpeedSteps 索引，默认 1.0×
         private Label _audioTimeLbl;
         private Label _audioMetaLbl;
         private Label _audioNameLbl;
@@ -646,7 +605,7 @@ namespace HoverExplorer
         private const int FolderMaxRows = 8;
 
         private Timer _unpinCloseTimer;
-        private Timer _gripTimer;
+
         private Timer _sizeSaveTimer;
         // 自定义内容类型：video / audio / svg（决定用哪套尺寸记忆）
         private string _mediaKind = "svg";
@@ -799,28 +758,13 @@ namespace HoverExplorer
             };
             _toolbar.Controls.Add(_audioPlayBtn);
 
-            // 倍速 + 关闭：与视频播放器操作栏一致（音频栏空间有限，倍速按钮做窄）
-            _audioSpdBtn = new Label
-            {
-                Size = new Size(34, 18),
-                AutoSize = false,
-                Text = MediaPreview.SpeedText(1.0),
-                Font = new Font("Microsoft YaHei", 8f),
-                ForeColor = Config.FG,
-                BackColor = Color.Transparent,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Cursor = Cursors.Hand
-            };
-            _audioSpdBtn.Click += delegate
-            {
-                if (_audio == null) return;
-                _audioSpdIdx = ( _audioSpdIdx + 1) % MediaPreview.SpeedSteps.Length;
-                double r = MediaPreview.SpeedSteps[_audioSpdIdx];
-                _audioSpdBtn.Text = MediaPreview.SpeedText(r);
-                _audio.SpeedRatio = r;
-            };
-            Tips.Set(_audioSpdBtn, I18n.T("tip_speed"));
-            _toolbar.Controls.Add(_audioSpdBtn);
+            // 倍速刻度尺（常显在标题栏上方，与视频一致）+ 关闭
+            _audioRuler = new MediaPreview.SpeedRuler();
+            _audioRuler.PreviewSpeed += delegate(double r) { if (_audio != null) _audio.SpeedRatio = r; MediaPreview.UpdateSpeedHint(_audioSpdHint, r); };
+            _audioRuler.CommitSpeed += delegate(double r) { if (_audio != null) _audio.SpeedRatio = r; MediaPreview.UpdateSpeedHint(_audioSpdHint, r); };
+            _audioRuler.RestoreSpeed += delegate { if (_audio != null) _audio.SpeedRatio = _audioRuler.Committed; MediaPreview.UpdateSpeedHint(_audioSpdHint, _audioRuler.Committed); };
+            Controls.Add(_audioRuler);
+            _audioSpdHint = MediaPreview.CreateSpeedHint(_scrollPanel, 2);
 
             _audioCloseBtn = new Label
             {
@@ -983,10 +927,17 @@ namespace HoverExplorer
                 infoH = _audioExpanded ? AudioInfoH : 0;
             }
             int body = infoH + listH;
+            // 刻度尺仅在展开时显示（悬停波形图展开卡片 → 刻度尺 + 详细信息）
+            int rulerH = 0;
+            if (_audioRuler != null)
+            {
+                _audioRuler.Visible = _audioExpanded && Config.SpeedToggle;
+                if (_audioExpanded) rulerH = _audioRuler.Height;
+            }
             // 只改窗口高度，不动宽度：ClientSize setter 会触发 WM_NCCALCSIZE 内缩 FramePad，
             // 每次读 ClientSize.Width（已被 WM_SIZE 更新为客户区宽）再写回会让窗口宽度递减 2*FramePad。
             // 用 Height（窗口高度）避开 ClientSize.Width 读写循环。
-            Height = _toolbarH + body + 2 * Win11.FramePad;
+            Height = _toolbarH + rulerH + body + 2 * Win11.FramePad;
             ApplyLayout();
             // 手动定位信息区与列表区（避免 AutoScroll+Dock 交互导致 _folderPanel 空白）
             int w = ClientSize.Width;
@@ -1466,36 +1417,6 @@ namespace HoverExplorer
             Controls.Add(_scrollPanel);
             Win11.ApplyScrollTheme(_scrollPanel, Config.Theme != "light");
 
-            // 右下角半透明拖拽手柄：平时隐藏，光标靠近右下角时浮现，避免遮挡内容
-            _grip = new SizeGripCtl { Size = new Size(18, 18), Cursor = Cursors.SizeNWSE, Visible = false };
-            _grip.MouseDown += (s, e) =>
-            {
-                if (e.Button != MouseButtons.Left) return;
-                NativeMethods.ReleaseCapture();
-                NativeMethods.SendMessage(Handle, 0xA1, 0x11, 0);
-            };
-            Controls.Add(_grip);
-            _grip.BringToFront();
-            Tips.Set(_grip, I18n.T("tip_resize"));
-
-            // 轮询光标控制手柄显隐：内容控件（WPF 播放器/滚动条）不上报鼠标事件，只能靠全局光标位置判断
-            _gripTimer = new Timer { Interval = 50 };
-            _gripTimer.Tick += (s, e) =>
-            {
-
-                NativeMethods.POINT pt;
-                if (!NativeMethods.GetCursorPos(out pt)) return;
-                // 音频窗高度由悬停展开模型管理，不出拖拽手柄（改宽走左右边缘）
-                bool allowGrip = _audio == null;
-                bool inCorner = allowGrip && pt.X >= Right - 20 && pt.X <= Right && pt.Y >= Bottom - 20 && pt.Y <= Bottom;
-                bool lDown = (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0;
-                if (inCorner || (_grip.Visible && lDown))
-                {
-                    if (!_grip.Visible) { _grip.Show(); _grip.BringToFront(); }
-                }
-                else if (_grip.Visible) _grip.Hide();
-            };
-            _gripTimer.Start();
 
             _iconLbl = new Label
             {
@@ -1707,9 +1628,17 @@ namespace HoverExplorer
             // 圆角模式描边与自身背景同色：亮色描边压在深色配色上很突兀，
             // 同色后只剩 DWM 圆角外形（回调动态取 BackColor，主题/层级着色跟随）
             if (Win11.WndNcBorder(Handle, ref m, () => BackColor)) return;
-            // WM_EXITSIZEMOVE：右下角手柄/边缘拖拽结束后记住尺寸（图片与媒体面板都记）。
-            // 拖动窗口位置也走这个消息，所以只有尺寸真的变了才记，否则挪一下窗口就把尺寸写死。
-            if (m.Msg == 0x231) _pvSizeMoveStart = ClientSize;
+            if (m.Msg == 0x84)   // WM_NCHITTEST
+            {
+                var lp = m.LParam.ToInt64();
+                var cp = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                int cw = ClientSize.Width, ch = ClientSize.Height;
+                // 音频窗高度由悬停展开模型管理，只允许左右边缘改宽
+                if (cp.X >= cw - 6 && cp.Y >= ch - 6 && _audio == null) { m.Result = (IntPtr)17; return; }
+                if (cp.X >= cw - 6 && cp.Y >= 0 && cp.Y < ch) { m.Result = (IntPtr)11; return; }
+                if (cp.Y >= ch - 6 && cp.X >= 0 && cp.X < cw && _audio == null) { m.Result = (IntPtr)12; return; }
+            }
+            else if (m.Msg == 0x231) _pvSizeMoveStart = ClientSize;
             else if (m.Msg == 0x232)
             {
                 if (ClientSize != _pvSizeMoveStart && (_content is PictureBox || _content is Panel))
@@ -2039,11 +1968,7 @@ namespace HoverExplorer
                 _audioPlayBtn.Location = new Point(6, btnY);
                 int vx = 32;
                 int vw = _pinBtn.Left - vx - 6;
-                if (_audioSpdBtn != null)
-                {
-                    _audioSpdBtn.Location = new Point(_pinBtn.Left - _audioSpdBtn.Width - 2, btnY);
-                    vw = _audioSpdBtn.Left - vx - 6;
-                }
+
                 if (_audioCloseBtn != null)
                     _audioCloseBtn.Location = new Point(_toolbar.Width - _audioCloseBtn.Width - 2, btnY);
                 if (vw < 40) vw = 40;
@@ -2101,12 +2026,20 @@ namespace HoverExplorer
 
         private void ApplyLayout()
         {
-            _grip.Location = new Point(ClientSize.Width - _grip.Width - 2, ClientSize.Height - _grip.Height - 2);
+
             if (!IsHandleCreated) return;
+            int rulerH = 0;
+            if (_audioRuler != null && _audioRuler.Visible)
+            {
+                rulerH = _audioRuler.Height;
+                _audioRuler.Location = new Point(0, _toolbarH);
+                _audioRuler.Size = new Size(ClientSize.Width, rulerH);
+                _audioRuler.BringToFront();
+            }
             _toolbar.Location = new Point(0, 0);
             _toolbar.Size = new Size(ClientSize.Width, _toolbarH);
-            _scrollPanel.Location = new Point(0, _toolbarH);
-            _scrollPanel.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - _toolbarH));
+            _scrollPanel.Location = new Point(0, _toolbarH + rulerH);
+            _scrollPanel.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - _toolbarH - rulerH));
             UpdateToolbarBtnPos();
         }
 
@@ -2180,7 +2113,7 @@ namespace HoverExplorer
         {
 
             if (_unpinCloseTimer != null) { _unpinCloseTimer.Stop(); _unpinCloseTimer.Dispose(); _unpinCloseTimer = null; }
-            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
+
             if (_audioUiTimer != null) { _audioUiTimer.Stop(); _audioUiTimer.Dispose(); _audioUiTimer = null; }
             if (_audioExpandTimer != null) { _audioExpandTimer.Stop(); _audioExpandTimer.Dispose(); _audioExpandTimer = null; }
             if (_audioFoldTimer != null) { _audioFoldTimer.Stop(); _audioFoldTimer.Dispose(); _audioFoldTimer = null; }
@@ -2643,8 +2576,6 @@ namespace HoverExplorer
         private Label _rowRenameBtn; // 行悬停时显示的"重命名"按钮（复制按钮左侧）
         private TextBox _rowEdit;   // 行内重命名编辑框（激活期间存在）
         private RowLabel _rowEditRow; // 正被行内重命名的行（Esc 取消时恢复显示）
-        private SizeGripCtl _grip;
-        private Timer _gripTimer;
 
         public bool Pinned { get { return _pinned; } }
 
@@ -2741,7 +2672,7 @@ namespace HoverExplorer
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            UpdateGripPos();
+
             // 拖动右下角手柄改宽度后同步顶部与行宽度（只同步宽度，不重排行高）
             if (ClientSize.Width != _panelW) SyncWidth(ClientSize.Width);
             if (_pinBtn != null) _pinBtn.BringToFront();
@@ -2784,10 +2715,16 @@ namespace HoverExplorer
             // 圆角模式描边与自身背景同色：亮色描边压在深色配色上很突兀，
             // 同色后只剩 DWM 圆角外形（回调动态取 BackColor，主题/层级着色跟随）
             if (Win11.WndNcBorder(Handle, ref m, () => BackColor)) return;
-            // 拖动面板用的是 WM_NCLBUTTONDOWN+HTCAPTION，它同样会发 WM_EXITSIZEMOVE。
-            // 因此必须区分“挪位置”和“改尺寸”：否则挪一下只有一个文件的小面板，
-            // 它的高度就被记成全局默认的 PanelHeight，之后文件多的列表也被压成这么高。
-            if (m.Msg == 0x231) { _sizeMoveStart = ClientSize; _fnBeginResizeFreeze(); }
+            if (m.Msg == 0x84)   // WM_NCHITTEST
+            {
+                var lp = m.LParam.ToInt64();
+                var cp = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                int cw = ClientSize.Width, ch = ClientSize.Height;
+                if (cp.X >= cw - 6 && cp.Y >= ch - 6) { m.Result = (IntPtr)17; return; }
+                if (cp.X >= cw - 6 && cp.Y >= 0 && cp.Y < ch) { m.Result = (IntPtr)11; return; }
+                if (cp.Y >= ch - 6 && cp.X >= 0 && cp.X < cw) { m.Result = (IntPtr)12; return; }
+            }
+            else if (m.Msg == 0x231) { _sizeMoveStart = ClientSize; _fnBeginResizeFreeze(); }
             else if (m.Msg == 0x232)
             {
                 _fnEndResizeFreeze();
@@ -2806,15 +2743,8 @@ namespace HoverExplorer
             base.WndProc(ref m);
         }
 
-        private void UpdateGripPos()
-        {
-            if (_grip == null || _grip.IsDisposed) return;
-            _grip.Location = new Point(ClientSize.Width - _grip.Width, ClientSize.Height - _grip.Height);
-        }
-
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
             CancelDragSub();
             base.OnFormClosed(e);
         }
@@ -2823,6 +2753,13 @@ namespace HoverExplorer
         internal static Image GetEntryIcon()
         {
             return GetIcon(Environment.GetFolderPath(Environment.SpecialFolder.System), true);
+        }
+
+        // 按路径返回图标：文件夹=文件夹图标，文件=扩展名关联图标
+        internal static Image GetEntryIconFor(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return GetEntryIcon();
+            return GetIcon(path, Directory.Exists(path));
         }
 
         private static Image GetIcon(string full, bool isDir)
@@ -2954,8 +2891,7 @@ namespace HoverExplorer
                 Controls.Add(freeze);
                 freeze.BringToFront();
             }
-            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); _gripTimer = null; }
-            _grip = null;
+
             _hlRow = null;
             _rows.Clear();
             _sortBtns.Clear();
@@ -3527,32 +3463,6 @@ namespace HoverExplorer
             // 空白处右键 = 选项菜单（排序功能已由顶部排序按钮覆盖）
             MouseClick += (s, e) => { if (e.Button == MouseButtons.Right && Program.TrayMenu != null) { _menuOpen = true; Program.TrayMenu.Show(Cursor.Position); } };
 
-            _grip = new SizeGripCtl { Size = new Size(16, 16), MatchStatusbar = true, Cursor = Cursors.SizeNWSE, Visible = false };
-            _grip.MouseDown += (s, e) =>
-            {
-                if (e.Button != MouseButtons.Left) return;
-                NativeMethods.ReleaseCapture();
-                NativeMethods.SendMessage(Handle, 0xA1, 0x11, 0);
-            };
-            Controls.Add(_grip);
-            _grip.BringToFront();
-            UpdateGripPos();
-            Tips.Set(_grip, I18n.T("tip_resize"));
-
-            // 只在鼠标位于面板内（或正在拖拽）时显示，避免常显手柄遮住右下角的行信息
-            if (_gripTimer != null) { _gripTimer.Stop(); _gripTimer.Dispose(); }
-            _gripTimer = new Timer { Interval = 150 };
-            _gripTimer.Tick += (s, e) =>
-            {
-                if (_grip == null || _grip.IsDisposed) return;
-                NativeMethods.POINT pt;
-                if (!NativeMethods.GetCursorPos(out pt)) return;
-                bool inside = pt.X >= Left && pt.X < Right && pt.Y >= Top && pt.Y < Bottom;
-                bool lDown = (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0;
-                bool want = inside || (lDown && _grip.Visible);
-                if (_grip.Visible != want) _grip.Visible = want;
-            };
-            _gripTimer.Start();
 
             // 不自动聚焦搜索框：后台进程在 Timer 里 Focus 只会得到"假焦点"
             // （光标闪但键盘消息仍归真正的前台窗口），需要点一下搜索框才能真正输入

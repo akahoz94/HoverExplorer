@@ -20,15 +20,7 @@ namespace HoverExplorer
 internal static class MediaPreview
 {
     // ===== 倍速 =====
-    // 档位循环：慢 → 快 → 回到慢
-    internal static readonly double[] SpeedSteps = { 0.5, 0.75, 1.0, 1.5, 2.0 };
-
-    internal static double NextSpeed(double cur)
-    {
-        for (int i = 0; i < SpeedSteps.Length; i++)
-            if (Math.Abs(SpeedSteps[i] - cur) < 0.001) return SpeedSteps[(i + 1) % SpeedSteps.Length];
-        return 1.0;
-    }
+    internal static readonly double[] SpeedSteps = { 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0 };
 
     internal static string SpeedText(double s)
     {
@@ -36,8 +28,162 @@ internal static class MediaPreview
         return t + "×";
     }
 
-    // 倍速按钮：显示当前倍速，点击循环下一档
-    internal static Button SpeedButton(Action<double> apply)
+    // 刻度尺：常显在进度条上方，6档等宽，悬停预览/点击锁定/离开恢复
+    internal sealed class SpeedRuler : Control
+    {
+        private double _committed = 1.0;
+        private int _hover = -1;
+        private readonly Font _fontN, _fontB;
+
+        internal event Action<double> PreviewSpeed;
+        internal event Action<double> CommitSpeed;
+        internal event Action RestoreSpeed;
+
+        internal double Committed { get { return _committed; } }
+
+        internal SpeedRuler()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Config.BG;
+            Height = 34;
+            Cursor = Cursors.Hand;
+            _fontN = new Font("Microsoft YaHei", 8f);
+            _fontB = new Font("Microsoft YaHei", 8f, FontStyle.Bold);
+        }
+
+        private int IndexAt(int x)
+        {
+            int n = SpeedSteps.Length;
+            int w = Width / n;
+            if (w <= 0) return -1;
+            int i = x / w;
+            if (i < 0 || i >= n) return -1;
+            return i;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int i = IndexAt(e.X);
+            if (i != _hover)
+            {
+                _hover = i;
+                Invalidate();
+                if (i >= 0) { try { PreviewSpeed(SpeedSteps[i]); } catch { } }
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_hover >= 0)
+            {
+                _hover = -1;
+                Invalidate();
+                try { RestoreSpeed(); } catch { }
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && _hover >= 0)
+            {
+                _committed = SpeedSteps[_hover];
+                Invalidate();
+                try { CommitSpeed(_committed); } catch { }
+            }
+        }
+
+        internal void SetCommitted(double s)
+        {
+            _committed = s;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            int n = SpeedSteps.Length;
+            int w = Width / n;
+            for (int i = 0; i < n; i++)
+            {
+                int cx = i * w + w / 2;
+                double s = SpeedSteps[i];
+                bool isCommitted = Math.Abs(s - _committed) < 0.001;
+                bool isHover = (i == _hover);
+
+                int tickH = (isCommitted || isHover) ? 12 : 7;
+                float tickW = isCommitted ? 3f : (isHover ? 2f : 1f);
+                Color tickColor = isCommitted ? Config.Accent : (isHover ? Config.FG : Config.FgDir);
+                using (var p = new Pen(tickColor, tickW))
+                    g.DrawLine(p, cx, Height - tickH - 2, cx, Height - 2);
+
+                string txt = SpeedText(s);
+                var font = (isCommitted || isHover) ? _fontB : _fontN;
+                Color textColor = isCommitted ? Config.Accent : (isHover ? Config.FG : Config.FgDir);
+                var sz = g.MeasureString(txt, font);
+                using (var b = new SolidBrush(textColor))
+                    g.DrawString(txt, font, b, cx - sz.Width / 2, 2);
+            }
+        }
+    }
+
+    // 悬停弹出横排速度浮层：悬停预览某档、点击固定、离开恢复
+    internal static void AttachSpeedHover(Control btn, Action<double> apply, Action<double> onSpeedChange)
+    {
+        double committed = 1.0;   // 固定速度（点击后）
+        Form flyout = null;
+        System.Windows.Forms.Timer closeTimer = null;
+        Action<double> notify = delegate(double s) { btn.Text = SpeedText(s); if (onSpeedChange != null) { try { onSpeedChange(s); } catch { } } };
+        Action<double> doApply = delegate(double s) { if (apply != null) { try { apply(s); } catch { } } notify(s); };
+        Action scheduleClose = delegate
+        {
+            if (closeTimer != null) return;
+            closeTimer = new System.Windows.Forms.Timer { Interval = 200 };
+            closeTimer.Tick += delegate
+            {
+                closeTimer.Stop(); closeTimer.Dispose(); closeTimer = null;
+                if (flyout != null) { try { flyout.Close(); flyout.Dispose(); } catch { } flyout = null; }
+                doApply(committed);   // 离开浮层恢复固定速度
+            };
+            closeTimer.Start();
+        };
+        Action cancelClose = delegate { if (closeTimer != null) { closeTimer.Stop(); closeTimer.Dispose(); closeTimer = null; } };
+        btn.MouseEnter += delegate
+        {
+            if (flyout != null && !flyout.IsDisposed) return;
+            cancelClose();
+            flyout = new Form { FormBorderStyle = FormBorderStyle.None, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, BackColor = Config.BG };
+            int bw = 38, x = 0;
+            var labels = new Label[SpeedSteps.Length];
+            for (int i = 0; i < SpeedSteps.Length; i++)
+            {
+                double s = SpeedSteps[i];
+                var lbl = new Label { Text = SpeedText(s), AutoSize = false, Size = new Size(bw, 24), Location = new Point(x, 0), TextAlign = ContentAlignment.MiddleCenter, Font = btn.Font, ForeColor = Config.FG, BackColor = (Math.Abs(s - committed) < 0.001) ? Config.BgHover : Config.BG, Cursor = Cursors.Hand };
+                int idx = i;
+                lbl.MouseEnter += delegate
+                {
+                    cancelClose();
+                    doApply(s);   // 悬停预览：临时应用
+                    for (int j = 0; j < labels.Length; j++) if (labels[j] != null && !labels[j].IsDisposed) labels[j].BackColor = (j == idx) ? Config.BgHover : Config.BG;
+                };
+                lbl.MouseLeave += delegate { scheduleClose(); };
+                lbl.Click += delegate { committed = s; };   // 点击固定该速度
+                flyout.Controls.Add(lbl); labels[i] = lbl; x += bw;
+            }
+            var p = btn.PointToScreen(Point.Empty);
+            flyout.Location = new Point(p.X, p.Y - 28);   // 上移，不覆盖按钮
+            flyout.Size = new Size(x, 24);
+            var owner = btn.FindForm();
+            if (owner != null) flyout.Show(owner); else flyout.Show();
+            flyout.MouseEnter += delegate { cancelClose(); };
+            flyout.MouseLeave += delegate { scheduleClose(); };
+            flyout.Deactivate += delegate { if (flyout != null) { try { flyout.Close(); flyout.Dispose(); } catch { } flyout = null; doApply(committed); } };
+        };
+        btn.MouseLeave += delegate { scheduleClose(); };
+    }
+
+    // 倍速按钮：显示当前倍速，悬停弹出横排速度选项
+    internal static Button SpeedButton(Action<double> apply, Action<double> onSpeedChange)
     {
         var b = new Button
         {
@@ -52,15 +198,44 @@ internal static class MediaPreview
         b.FlatAppearance.BorderSize = 0;
         b.FlatAppearance.MouseOverBackColor = Config.BgHover;
         b.FlatAppearance.MouseDownBackColor = Config.BgHover;
-        Tips.Set(b, I18n.T("tip_speed"));
-        double cur = 1.0;
-        b.Click += delegate
-        {
-            cur = NextSpeed(cur);
-            b.Text = SpeedText(cur);
-            if (apply != null) { try { apply(cur); } catch { } }
-        };
+        AttachSpeedHover(b, apply, onSpeedChange);
         return b;
+    }
+
+    // 窗口右上角速度提示浮层：speed != 1.0 时显示
+    internal static Label CreateSpeedHint(Control host, int yOff)
+    {
+        var hint = new Label
+        {
+            AutoSize = false,
+            Size = new Size(50, 20),
+            Text = "",
+            Font = new Font("Microsoft YaHei", 9f, FontStyle.Bold),
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(160, 0, 0, 0),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Visible = false,
+        };
+        host.Controls.Add(hint);
+        hint.BringToFront();
+        PositionSpeedHint(hint, host, yOff);
+        host.SizeChanged += delegate { PositionSpeedHint(hint, host, yOff); };
+        return hint;
+    }
+
+    private static void PositionSpeedHint(Label hint, Control host, int yOff)
+    {
+        if (hint == null || hint.IsDisposed) return;
+        hint.Location = new Point(host.Width - hint.Width - 6, yOff);
+    }
+
+    internal static void UpdateSpeedHint(Label hint, double speed)
+    {
+        if (hint == null || hint.IsDisposed) return;
+        hint.Text = SpeedText(speed);
+        hint.Visible = Math.Abs(speed - 1.0) > 0.001;
+        var host = hint.Parent;
+        if (host != null) hint.Location = new Point(host.Width - hint.Width - 6, hint.Location.Y);
     }
 
     // 关闭按钮：关掉承载的预览窗（播放会话随窗体 Dispose 一并停止）
@@ -192,8 +367,26 @@ internal static class MediaPreview
         // 操作栏（播放键/进度覆盖层/频谱）由 PreviewForm 自绘，播放状态通过 MediaSession 读写
         internal static WinControl MediaPlayer(string path, bool isVideo, int w, int h)
         {
+            // 音频优先走 ffmpeg + atempo（保调倍速）：检测到 ffmpeg 就用，
+            // 没检测到回退 MCI/WPF（倍速会变音调）
+            if (!isVideo && FfmpegTools.FindFfmpeg() != null)
+            {
+                try
+                {
+                    var ff = new FfmpegAudioSession(path);
+                    if (!ff.HasFailed)
+                    {
+                        var mp = new WinControl { Size = new Size(w, h) };
+                        mp.Tag = ff;
+                        mp.Disposed += delegate { ff.Close(); };
+                        return mp;
+                    }
+                    ff.Close();
+                }
+                catch { }
+            }
             // 真 MP3 走 MCI：无索引 MP3 的 Media Foundation 打开要全文件扫描求时长（大文件数秒），
-            // MCI 只读头部毫秒级打开。魔数检测过滤“假 MP3”（油管 DASH 流改扩展名，MCI 必败）；
+            // MCI 只读头部毫秒级打开。魔数检测过滤"假 MP3"（油管 DASH 流改扩展名，MCI 必败）；
             // MCI 打开失败时仍回退 MediaElement
             if (!isVideo && string.Equals(System.IO.Path.GetExtension(path), ".mp3", StringComparison.OrdinalIgnoreCase)
                 && IsRealMp3(path))
@@ -233,15 +426,39 @@ internal static class MediaPreview
             btn.FlatAppearance.MouseDownBackColor = Config.BgHover;
             var lblTime = new Label { Width = 110, Dock = DockStyle.Right, Text = I18n.T("media_loading"), TextAlign = ContentAlignment.MiddleRight, ForeColor = Config.FgDir, BackColor = Config.BG, AutoEllipsis = true, Font = new Font("Microsoft YaHei", 8) };
             var prog = new SeekBar { Dock = DockStyle.Fill };
-            var spd = SpeedButton(delegate(double r) { try { session.SpeedRatio = r; } catch { } });
+            var spdHint = CreateSpeedHint(panel, 4);
+            var ruler = new SpeedRuler { Dock = DockStyle.Bottom };
+            ruler.PreviewSpeed += delegate(double r) { try { session.SpeedRatio = r; } catch { } UpdateSpeedHint(spdHint, r); };
+            ruler.CommitSpeed += delegate(double r) { try { session.SpeedRatio = r; } catch { } UpdateSpeedHint(spdHint, r); };
+            ruler.RestoreSpeed += delegate { try { session.SpeedRatio = ruler.Committed; } catch { } UpdateSpeedHint(spdHint, ruler.Committed); };
             var cls = CloseButton(panel);
-            // 加入顺序 = z 序；Dock 按 z 序反序算，最终视觉：[播放][倍速][进度][时间][关闭]
+            // bar：[播放][进度][时间][关闭]
             bar.Controls.Add(prog);
-            bar.Controls.Add(spd);
             bar.Controls.Add(btn);
             bar.Controls.Add(lblTime);
             bar.Controls.Add(cls);
+            // ruler 先加（z序高），bar 后加（z序低=最底层，Dock先处理=最底部）
+            panel.Controls.Add(ruler);
             panel.Controls.Add(bar);
+            if (!Config.SpeedToggle) ruler.Hide();
+
+            // 长按画面加速到 3×，释放恢复（WPF MediaElement 有独立 HWND，须用 WPF 鼠标事件）
+            double savedSpd = 1.0;
+            session.WpfMedia.MouseLeftButtonDown += delegate(object s, System.Windows.Input.MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (!Config.SpeedToggle) return;
+                try { savedSpd = session.SpeedRatio; } catch { savedSpd = 1.0; }
+                try { session.SpeedRatio = 3.0; } catch { }
+                UpdateSpeedHint(spdHint, 3.0);
+            };
+            session.WpfMedia.MouseLeftButtonUp += delegate(object s, System.Windows.Input.MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (!Config.SpeedToggle) return;
+                try { session.SpeedRatio = savedSpd; } catch { }
+                UpdateSpeedHint(spdHint, savedSpd);
+            };
 
             session.Opened += delegate
             {
@@ -323,6 +540,7 @@ internal static class MediaPreview
                         try
                         {
                             bar.Hide();
+                            ruler.Hide();
                             fv.Visible = true;
                             fv.BringToFront();
                         }
@@ -684,6 +902,7 @@ internal static class MediaPreview
         }
 
         public WinControl HostView { get { return _host; } }
+        public System.Windows.Controls.MediaElement WpfMedia { get { return _me; } }
         public bool IsLoaded { get { return _loaded; } }
         public bool IsPlaying { get { return _playing && !_failed; } }
         public bool HasFailed { get { return _failed; } }

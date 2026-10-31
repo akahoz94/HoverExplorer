@@ -363,16 +363,37 @@ namespace HoverExplorer
                 Font = new Font("Microsoft YaHei", 8)
             };
             _prog = new MediaPreview.SeekBar { Dock = DockStyle.Fill };
-            // 倍速：改的是"消费帧率"，ffmpeg 进程不用重启
-            var spd = MediaPreview.SpeedButton(delegate(double r) { _speed = r; });
+            // 倍速刻度尺：改的是"消费帧率"，ffmpeg 进程不用重启
+            var spdHint = MediaPreview.CreateSpeedHint(this, 4);
+            var ruler = new MediaPreview.SpeedRuler { Dock = DockStyle.Bottom };
+            ruler.PreviewSpeed += delegate(double r) { _speed = r; MediaPreview.UpdateSpeedHint(spdHint, r); };
+            ruler.CommitSpeed += delegate(double r) { _speed = r; MediaPreview.UpdateSpeedHint(spdHint, r); };
+            ruler.RestoreSpeed += delegate { _speed = ruler.Committed; MediaPreview.UpdateSpeedHint(spdHint, ruler.Committed); };
             var cls = MediaPreview.CloseButton(this);
-            // 加入顺序 = z 序；Dock 按 z 序反序算，最终视觉：[播放][倍速][进度][时间][关闭]
+            // bar：[播放][进度][时间][关闭]
             bar.Controls.Add(_prog);
-            bar.Controls.Add(spd);
             bar.Controls.Add(_btn);
             bar.Controls.Add(_lbl);
             bar.Controls.Add(cls);
+            Controls.Add(ruler);
             Controls.Add(bar);
+            if (!Config.SpeedToggle) ruler.Hide();
+
+            // 长按画面加速到 3×，释放恢复
+            double savedSpd = 1.0;
+            _pb.MouseDown += delegate
+            {
+                if (!Config.SpeedToggle) return;
+                savedSpd = _speed;
+                _speed = 3.0;
+                MediaPreview.UpdateSpeedHint(spdHint, 3.0);
+            };
+            _pb.MouseUp += delegate
+            {
+                if (!Config.SpeedToggle) return;
+                _speed = savedSpd;
+                MediaPreview.UpdateSpeedHint(spdHint, savedSpd);
+            };
 
             _btn.Click += delegate { TogglePlay(); };
             _prog.Seek += delegate(double ratio) { SeekTo(ratio); };

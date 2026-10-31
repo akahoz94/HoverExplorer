@@ -32,9 +32,21 @@ namespace HoverExplorer
         //    若 Alt 同时是当前功能门控键则豁免（否则门控永不生效）
         // ② 门控：按住任一所选修饰键才放行——只拦"从无到有"的第一级触发（桌面/资源管理器直接悬停）。
         //    一级面板已通过门控，面板内部的子面板/行预览免键操作，走 HoverSuppressedInside
-        internal static bool HoverSuppressed(bool forPreview) { return HoverSuppressed(System.Windows.Forms.Control.ModifierKeys, forPreview, true); }
+        // 修饰键实时态：必须用 GetAsyncKeyState（全局实时，独立于线程消息队列）。
+        // Control.ModifierKeys(=GetKeyState) 是线程本地缓存——本进程不是前台时（悬停资源管理器的常态）
+        // 键盘消息进的是 Explorer 的队列，这里读到的是上次处理消息时的旧快照，UIA 探测越忙越滞后，
+        // 表现为"按住 Ctrl 门控时灵时不灵"。项目内其余按键判定（拖拽/热键/翻页）本就用 GetAsyncKeyState
+        internal static System.Windows.Forms.Keys RealModifiers()
+        {
+            var mk = System.Windows.Forms.Keys.None;
+            if ((HoverExplorer.NativeMethods.GetAsyncKeyState(0x11) & 0x8000) != 0) mk |= System.Windows.Forms.Keys.Control;
+            if ((HoverExplorer.NativeMethods.GetAsyncKeyState(0x10) & 0x8000) != 0) mk |= System.Windows.Forms.Keys.Shift;
+            if ((HoverExplorer.NativeMethods.GetAsyncKeyState(0x12) & 0x8000) != 0) mk |= System.Windows.Forms.Keys.Alt;
+            return mk;
+        }
+        internal static bool HoverSuppressed(bool forPreview) { return HoverSuppressed(RealModifiers(), forPreview, true); }
         // 面板内部触发（子面板/行预览）：不做门控，只吃 Alt 临时禁用
-        internal static bool HoverSuppressedInside(bool forPreview) { return HoverSuppressed(System.Windows.Forms.Control.ModifierKeys, forPreview, false); }
+        internal static bool HoverSuppressedInside(bool forPreview) { return HoverSuppressed(RealModifiers(), forPreview, false); }
         internal static bool HoverSuppressed(System.Windows.Forms.Keys mk, bool forPreview, bool applyGate)
         {
             int gateMods = forPreview ? PreviewGateMods : FolderGateMods;

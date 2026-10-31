@@ -4810,7 +4810,7 @@ namespace HoverExplorer
             if (sel.Count > 1 && sel.Contains(row))
             {
                 var m = new ContextMenuStrip { BackColor = Config.BG, ForeColor = Config.FG, Font = new Font(Config.FontName, Config.FontSize) };
-                m.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
+            m.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
                 m.Items.Add(MI(I18n.T("delete_n", sel.Count), () => RecycleRows(sel)));
                 m.Items.Add(MI(I18n.T("copy_path_n", sel.Count), () => CopyText(string.Join("\n", sel.Select(r => r.Full)))));
                 m.Items.Add(MI(I18n.T("cancel_sel"), () => ClearSel()));

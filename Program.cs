@@ -392,6 +392,7 @@ namespace HoverExplorer
             trayMenu.Items.Add(exitItem);
 
             TrayMenu = trayMenu;
+            ThemeStripRecursive(trayMenu);
             // 选项菜单关闭后解除所有面板的菜单打开标记（避免面板被悬停丢失逻辑关闭后标记残留）
             trayMenu.Closed += (s, e) => { foreach (var p in _panels) p.MenuOpen = false; };
             _notifyIcon.ContextMenuStrip = trayMenu;
@@ -641,6 +642,22 @@ namespace HoverExplorer
             _saveTimer.Start();
         }
 
+        // 菜单全局主题化：递归所有子下拉（语言/主题等子菜单是独立 ToolStrip，不继承父级
+        // ForeColor/渲染器——漏一层就是黑字白底）。DarkColorTable 属性实时读 Config，
+        // 主题切换后重挂即全局换装
+        private static void ThemeStripRecursive(ToolStrip strip)
+        {
+            if (strip == null) return;
+            strip.ForeColor = Config.FG;
+            strip.Renderer = new ToolStripProfessionalRenderer(new DarkColorTable());
+            foreach (ToolStripItem it in strip.Items)
+            {
+                it.ForeColor = Config.FG;
+                var dd = it as ToolStripDropDownItem;
+                if (dd != null && dd.HasDropDownItems) ThemeStripRecursive(dd.DropDown);
+            }
+        }
+
         // 主题切换级联（托盘菜单三选一与"跟随系统"自动切换共用同一刷新链）
         internal static void ApplyThemeChange()
         {
@@ -648,7 +665,7 @@ namespace HoverExplorer
             Config.Save();
             _lastSysDark = Config.SystemDark;
             PopupForm.ClearUiIconCache();
-            if (TrayMenu != null) TrayMenu.ForeColor = Config.FG;   // 托盘菜单文字跟主题
+            if (TrayMenu != null) ThemeStripRecursive(TrayMenu);   // 全菜单层级跟主题
             foreach (var p in _panels) p.RefreshPanel();
             foreach (var c in _pinCards) { if (!c.IsDisposed) c.ApplyPalette(); }
             EntryListForm.NotifyChanged();

@@ -41,7 +41,8 @@ namespace HoverExplorer
         private ToggleSwitch _rowSwapToggle;
         private ToggleSwitch _altSuppressToggle;
         private DarkCombo _modeExplorer;  // 悬停浏览模式：0 关闭 1 总是 2 按住Ctrl 3 按住Shift 4 按住Alt
-        private Label _altGateHint;       // 门控键=Alt 时的互斥说明（动态显隐）
+        private Label _modeExplorerDesc;  // 悬停浏览行的描述（动态换互斥/冗余提示）
+        private Label _modePreviewDesc;   // 文件预览行的描述（同上）       // 门控键=Alt 时的互斥说明（动态显隐）
         private bool _internalSync;       // 托盘→设置回写时抑制 SelectedIndexChanged 的反向应用
         private DarkCombo _modePreview;   // 文件预览模式（同上）
         private ToggleSwitch _pvMuteToggle;         // 视频预览默认静音
@@ -335,26 +336,12 @@ namespace HoverExplorer
             // 即改即生效，ApplySettingsLive 会把托盘勾选态同步
             _modeExplorer = _fnMakeModeCombo(ModeFromConfig(Config.ExplorerEnabled, Config.FolderGateEnabled, Config.FolderGateMods));
             _modeExplorer.SelectedIndexChanged += (s, e) => { _fnUpdateAltGateHint(); _fnApplySettings(false, false); };
-            y = _hoverGroup.AddRow(y, I18n.T("explorer_hover"), I18n.T("mode_desc"), _modeExplorer);
+            y = _hoverGroup.AddRow(y, I18n.T("explorer_hover"), _fnAltHintText(), _modeExplorer, out _modeExplorerDesc);
 
             _modePreview = _fnMakeModeCombo(ModeFromConfig(Config.PreviewFiles, Config.PreviewGateEnabled, Config.PreviewGateMods));
             _modePreview.SelectedIndexChanged += (s, e) => { _fnUpdateAltGateHint(); _fnApplySettings(false, false); };
-            y = _hoverGroup.AddRow(y, I18n.T("file_preview"), I18n.T("mode_desc"), _modePreview);
+            y = _hoverGroup.AddRow(y, I18n.T("file_preview"), _fnAltHintText(), _modePreview, out _modePreviewDesc);
 
-            // Alt 互斥提示行：任一模式选了"按住 Alt"就亮出说明（门控键=Alt 时按 Alt 是放行不是禁用）。
-            // 空间常驻（RowH），避免 AccGroup 只增不减的行高机制导致布局跳动
-            _altGateHint = new Label
-            {
-                Location = new Point(AccGroup.InL, AccGroup.HeadH + y),
-                AutoSize = true,
-                Font = new Font(Config.FontName, 8f),
-                Visible = false,
-                Tag = "paint"
-            };
-            _hoverGroup.Controls.Add(_altGateHint);
-            _hoverGroup.ExpandRow(y, RowH);
-            y += RowH;
-            _fnUpdateAltGateHint();   // 打开设置窗时若已选"按住 Alt"，提示立即就位
 
             // 窗口边角：直角（卡片风默认）/ 圆角·粗描边（Win11）；切换即时重刷存活窗口
             _cornerCombo = new DarkCombo { Font = new Font(Config.FontName, 8.5f), Width = 150, Height = 24 };
@@ -1457,21 +1444,42 @@ namespace HoverExplorer
         }
 
         // 任一模式下拉选了"按住 Alt" → 亮出互斥说明
+        // 行高预留：三种动态文案里最长的（AddRow 一次性按它留高，运行时替换短文案不裁切）
+        private string _fnAltHintText()
+        {
+            string a = I18n.T("mode_desc"), b = I18n.T("alt_gate_hint"), c = I18n.T("alt_suppress_redundant");
+            string m = a.Length >= b.Length ? a : b;
+            return c.Length > m.Length ? c : m;
+        }
+
         private void _fnUpdateAltGateHint()
         {
-            if (_altGateHint == null) return;
-            // 三态提示：①某功能选了"按住 Alt" → 互斥说明；②两功能都不再"总是"触发 →
-            // "按住 Alt 禁用"已无用武之地（保留功能只提示，不改行为）；③隐藏。
-            // ①优先于②（更具体、更易误解的场景先解释）
-            int ex = _modeExplorer != null ? _modeExplorer.SelectedIndex : 1;
-            int pv = _modePreview != null ? _modePreview.SelectedIndex : 1;
-            string text = null;
-            if (ex == 4 || pv == 4) text = I18n.T("alt_gate_hint");
-            else if (ex != 1 && pv != 1) text = I18n.T("alt_suppress_redundant");
-            _altGateHint.Visible = text != null;
-            if (text == null) return;
-            _altGateHint.Text = text;
-            _altGateHint.ForeColor = Config.IsDark ? ColorTranslator.FromHtml("#e5b84f") : ColorTranslator.FromHtml("#a8720a");
+            if (_modeExplorerDesc == null || _modePreviewDesc == null) return;
+            // 三态：①任一功能选了"按住 Alt" → 互斥说明；②两功能都"按住键/关闭" →
+            // "按住 Alt 禁用"已无用武之地（保留功能只提示，不改行为）；③其余显示常规说明
+            int ex = _modeExplorer.SelectedIndex;
+            int pv = _modePreview.SelectedIndex;
+            string text; bool amber;
+            if (ex == 4 || pv == 4)
+            {
+                text = I18n.T("alt_gate_hint");
+                amber = true;
+            }
+            else if (ex != 1 && pv != 1)
+            {
+                text = I18n.T("alt_suppress_redundant");
+                amber = true;
+            }
+            else
+            {
+                text = I18n.T("mode_desc");
+                amber = false;
+            }
+            Color fg = amber ? ColorTranslator.FromHtml(Config.IsDark ? "#e5b84f" : "#a8720a") : Config.PlaceholderFg;
+            _modeExplorerDesc.Text = text;
+            _modePreviewDesc.Text = text;
+            _modeExplorerDesc.ForeColor = fg;
+            _modePreviewDesc.ForeColor = fg;
         }
 
         // 模式下拉（悬停浏览/文件预览共用）：0 关闭 1 总是 2 按住Ctrl 3 按住Shift 4 按住Alt
@@ -1793,6 +1801,12 @@ namespace HoverExplorer
             // 内容行：左标题/描述、右控件；描述限宽自动换行动态撑高
             public int AddRow(int y, string title, string desc, Control right)
             {
+                Label dl;
+                return AddRow(y, title, desc, right, out dl);
+            }
+
+            public int AddRow(int y, string title, string desc, Control right, out Label descLabel)
+            {
                 var t = new Label
                 {
                     Text = title,
@@ -1822,6 +1836,7 @@ namespace HoverExplorer
                     };
                     Controls.Add(d);
                 }
+                descLabel = d;
                 if (right != null)
                 {
                     int dy = right.Height <= 22 ? 0 : -2;

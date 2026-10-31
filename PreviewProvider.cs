@@ -109,6 +109,36 @@ namespace HoverExplorer
         }
 
         // ===== 图片 / 图标 / TIFF =====
+        // ffmpeg 单帧兜底：解成 BMP 流交回 GDI+。ffmpeg 不存在/解不动返回 null（上层按无预览处理）
+        private static Image LoadViaFfmpeg(string full)
+        {
+            string ff = FfmpegTools.FindFfmpeg();
+            if (ff == null) return null;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ff,
+                    Arguments = "-v error -i \"" + full + "\" -frames:v 1 -f image2pipe -vcodec bmp -",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    var ms = new MemoryStream();
+                    p.StandardOutput.BaseStream.CopyTo(ms);
+                    p.WaitForExit(8000);
+                    if (ms.Length == 0) return null;
+                    var bytes = ms.ToArray();          // 拷贝出定长缓冲：Image 生命周期内流必须保持存活
+                    var mem = new MemoryStream(bytes);
+                    return Image.FromStream(mem);
+                }
+            }
+            catch { return null; }
+        }
+
         private static PreviewResult GenImage(string full)
         {
             Image img;
@@ -132,6 +162,7 @@ namespace HoverExplorer
                 catch
                 {
                     img = LoadViaWic(full);
+                    if (img == null) img = LoadViaFfmpeg(full);   // WIC 也没有：EXR/DPX/TGA/QOI 等交给 ffmpeg
                     if (img == null) throw;
                 }
             }

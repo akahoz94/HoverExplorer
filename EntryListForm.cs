@@ -53,7 +53,7 @@ namespace HoverExplorer
         {
             base.OnHandleCreated(e);
             // 与面板/预览一致：暗色标题区 + DWM 圆角（Win11）+ 投影
-            Win11.Apply(Handle, Config.Theme != "light", Config.Border);
+            Win11.Apply(Handle, Config.IsDark, Config.Border);
         }
 
         public EntryListForm(Action<string, Point> onOpenFolder)

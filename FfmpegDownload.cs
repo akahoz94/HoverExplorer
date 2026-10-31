@@ -43,6 +43,10 @@ namespace HoverExplorer
         internal static void Download(Action<string> status, Action<bool, string> done)
         {
             if (_busy) return;
+            // csc 直编的程序没有 TargetFrameworkAttribute，运行时按 4.0 旧默认只启用
+            // SSL3/TLS1.0，而 gyan.dev 仅收 TLS1.2+（"未能创建 SSL/TLS 安全通道"的根因）。
+            // 显式补齐现代协议（实测本机：默认 HEAD 失败，加 Tls12 后 200）
+            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
             _busy = true;
             const string url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
             var zipPath = Path.Combine(Path.GetTempPath(), "hoverexplorer_ffmpeg.zip");

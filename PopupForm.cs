@@ -5259,30 +5259,10 @@ namespace HoverExplorer
         }
 
         // 级联层级色条：红橙黄绿青蓝紫循环，区分叠叠的面板
-        private static readonly Color[] _levelColors = {
-            Color.FromArgb(0xe5, 0x48, 0x4d), Color.FromArgb(0xf0, 0x7f, 0x1c), Color.FromArgb(0xf2, 0xa9, 0x00),
-            Color.FromArgb(0x2f, 0xae, 0x66), Color.FromArgb(0x14, 0xb8, 0xa6), Color.FromArgb(0x3b, 0x82, 0xf6),
-            Color.FromArgb(0x8b, 0x5c, 0xf6),
-        };
-        private static Color LevelColor(int level) { return _levelColors[level % _levelColors.Length]; }
+        // 面板底色：不做层级染色（v1.0.7 的红/橙/黄层级色在深色模式下是整片暗红/暗棕，
+        // 用户两轮反馈不可接受；层级关系由子面板的错位排布自明）
+        private static Color LevelBgColor(int level) { return Config.BG; }
 
-        // 整面板背景按 level 轻微着色：LevelColor 低透明叠加底色，level 越大越浅（父级深）。
-        // 顶级面板（level 0）不染色：红调 28/255 叠加深色底整面板发红（深色模式下 ListBg==BG，
-        // 行区也会被下方染色递归一起染上，用户误以为面板坏了）；层级区分从 level 1 开始已够用
-        private static Color LevelBgColor(int level)
-        {
-            if (level <= 0) return Config.BG;
-            Color c = LevelColor(level), bg = Config.BG;
-            int a = Math.Max(8, 28 - level * 6);  // L1 22, L2 16, L3 10, L4+ 8
-            return Color.FromArgb((c.R * a + bg.R * (255 - a)) / 255, (c.G * a + bg.G * (255 - a)) / 255, (c.B * a + bg.B * (255 - a)) / 255);
-        }
-        // 行悬停/展开高亮：比该级背景深一档
-        private static Color LevelHoverColor(int level)
-        {
-            Color c = LevelColor(level), bg = LevelBgColor(level);
-            int a = 48;
-            return Color.FromArgb((c.R * a + bg.R * (255 - a)) / 255, (c.G * a + bg.G * (255 - a)) / 255, (c.B * a + bg.B * (255 - a)) / 255);
-        }
     }
 
     internal class DarkColorTable : ProfessionalColorTable
